@@ -1,5 +1,5 @@
 import { Mastra } from '@mastra/core';
-import { tradingAgent } from './trader/agent';
+import { tradingAgent } from './trader/agent.js';
 
 // Create Mastra instance with trading agent and memory configuration
 export const mastra = new Mastra({

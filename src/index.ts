@@ -1,8 +1,8 @@
 import 'dotenv/config';
-import { mastra } from './mastra';
-import { BinanceMarginTrader } from './trader/MarginTrader';
-import { BinanceMarketInspector } from './trader/MarketInspector';
-import { initializeTools } from './trader/tools';
+import { mastra } from './mastra.js';
+import { BinanceMarginTrader } from './trader/MarginTrader.js';
+import { BinanceMarketInspector } from './trader/MarketInspector.js';
+import { initializeTools } from './trader/tools.js';
 
 async function main() {
   console.log('Trading Agent Starting...\n');
@@ -37,20 +37,18 @@ async function main() {
   console.log('🔧 Sandbox mode:', process.env.BINANCE_SANDBOX === 'true' ? 'ON' : 'OFF');
   console.log('\n' + '='.repeat(60) + '\n');
 
-  // Simple interactive prompt
-  const prompt = 'Give me a complete overview of my trading account and current market opportunities.';
+  const prompt = `New round begins.
+Symbols under management: BTC/USDT,ETH/USDT,BNB/USDT,XRP/USDT,SOL/USDT,TRX/USDT,AVAX/USDT
+Current time: ${new Date().toUTCString()}
+Follow the system instructions to analyze the market, choose actions, and update the note.`;
 
   console.log('💭 Query:', prompt);
   console.log('\n' + '-'.repeat(60) + '\n');
 
   const response = await agent.generate(prompt, { threadId });
 
-  console.log('🤖 Agent Response:\n');
   console.log(response.text);
-  console.log('\n' + '='.repeat(60) + '\n');
-
   console.log('✨ Session complete!');
-  console.log('💡 Run "npm run example" to see more examples');
 }
 
 main().catch((error) => {

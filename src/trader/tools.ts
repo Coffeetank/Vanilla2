@@ -1,7 +1,7 @@
 import { createTool } from '@mastra/core';
 import { z } from 'zod';
-import { BinanceMarginTrader } from './MarginTrader';
-import { BinanceMarketInspector } from './MarketInspector';
+import { BinanceMarginTrader } from './MarginTrader.js';
+import { BinanceMarketInspector } from './MarketInspector.js';
 
 // Initialize trader and inspector instances
 // These will be injected by the agent
@@ -170,9 +170,9 @@ export const createStopLimitOrderTool = createTool({
 
 export const getOpenOrdersTool = createTool({
   id: 'get-open-orders',
-  description: 'Get all open orders, optionally filtered by symbol.',
+  description: 'Get all open orders for a specific trading pair symbol. Symbol is required to avoid rate limiting.',
   inputSchema: z.object({
-    symbol: z.string().optional().describe('Trading pair symbol to filter by'),
+    symbol: z.string().describe('Trading pair symbol (e.g., BTC/USDT)'),
   }),
   outputSchema: z.array(z.any()),
   execute: async ({ context }) => {

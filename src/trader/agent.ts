@@ -1,6 +1,5 @@
 import { Agent } from "@mastra/core/agent";
-import { openai } from '@ai-sdk/openai';
-import * as tools from './tools';
+import * as tools from './tools.js';
 import { createTool } from "@mastra/core/tools";
 import { z } from "zod";
 import fs from 'fs';
@@ -32,7 +31,7 @@ export const noteTaking = createTool({
 export const noteReading = createTool({
   id: "noteReading",
   description: "Read the note recorded from previous round to understand current procedure better.",
-  inputSchema: z.void(),
+  inputSchema: z.object({}),
   outputSchema: z.object({
     noteContent: z.string()
   }),
@@ -154,7 +153,7 @@ For each potential trade, perform:
 
 Remember: You are an autonomous trading agent. Make decisions independently based on data and strategy. Do not communicate with users - focus on executing the trading strategy effectively.`,
 
-  model: openai('deepseek-chat'),
+  model: "deepseek/deepseek-chat",
 
   tools: {
     noteTaking,
