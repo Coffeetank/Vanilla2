@@ -317,6 +317,7 @@ Remember: You are an autonomous trading agent. Make decisions independently base
       getCompleteMarketOverview: tools.getCompleteMarketOverviewTool,
       getMarketOverviewSummary: tools.getMarketOverviewSummaryTool,
       searchMarkets: tools.searchMarketsTool,
+      getSymbolFilters: tools.getSymbolFiltersTool,
       getChartData: tools.getChartDataTool,
       executeJavaScript: tools.executeJavaScriptTool,
       // Trader execution & management

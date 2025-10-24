@@ -1308,6 +1308,43 @@ export class BinanceMarketInspector {
       .slice(0, 20);
   }
 
+  async getSymbolFilters(symbol: string): Promise<{
+    lotSize?: { minQty: number; maxQty: number; stepSize: number };
+    priceFilter?: { minPrice: number; maxPrice: number; tickSize: number };
+    notional?: { minNotional: number };
+  }> {
+    const markets = await this.exchange.fetchMarkets();
+    const market = markets.find((m: any) => m?.symbol === symbol);
+
+    if (!market) {
+      throw new Error(`Symbol ${symbol} not found`);
+    }
+
+    const filters: any = {};
+    const marketFilters = (market as any).filters || [];
+    for (const filter of marketFilters) {
+      if (filter.filterType === 'LOT_SIZE') {
+        filters.lotSize = {
+          minQty: parseFloat(filter.minQty || '0'),
+          maxQty: parseFloat(filter.maxQty || '1000000'),
+          stepSize: parseFloat(filter.stepSize || '0.000001')
+        };
+      } else if (filter.filterType === 'PRICE_FILTER') {
+        filters.priceFilter = {
+          minPrice: parseFloat(filter.minPrice || '0'),
+          maxPrice: parseFloat(filter.maxPrice || '1000000'),
+          tickSize: parseFloat(filter.tickSize || '0.000001')
+        };
+      } else if (filter.filterType === 'MIN_NOTIONAL') {
+        filters.notional = {
+          minNotional: parseFloat(filter.minNotional || '0')
+        };
+      }
+    }
+
+    return filters;
+  }
+
   // Advanced Technical Indicators
   async getTechnicalIndicators(symbol: string, timeframe: string = '1h'): Promise<TechnicalIndicators> {
     const ohlcv = await this.exchange.fetchOHLCV(symbol, timeframe, undefined, 100);

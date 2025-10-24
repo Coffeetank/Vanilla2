@@ -252,6 +252,16 @@ export const searchMarketsTool: ToolDefinition = {
   },
 };
 
+export const getSymbolFiltersTool: ToolDefinition = {
+  description: 'Get symbol filters including LOT_SIZE, PRICE_FILTER, and MIN_NOTIONAL requirements.',
+  parameters: z.object({
+    symbol: z.string().describe('Trading pair symbol (e.g., "BTC/USDT")'),
+  }),
+  execute: async ({ symbol }: { symbol: string }) => {
+    return await marketInspector.getSymbolFilters(symbol);
+  },
+};
+
 // ============================================
 // TRADER EXECUTION TOOLS (MARKETTRADER)
 // ============================================
@@ -547,6 +557,7 @@ export const allTools = [
   getCompleteMarketOverviewTool,
   getMarketOverviewSummaryTool,
   searchMarketsTool,
+  getSymbolFiltersTool,
   getChartDataTool,
   executeJavaScriptTool,
   // Execution & Order Management
