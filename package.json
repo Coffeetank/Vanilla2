@@ -6,7 +6,8 @@
   "scripts": {
     "build": "tsc",
     "start": "node dist/index.js",
-    "dev": "ts-node src/index.ts"
+    "dev": "ts-node src/index.ts",
+    "test:integration": "ts-node tests/integration.test.ts"
   },
   "keywords": [],
   "author": "",
@@ -18,7 +19,12 @@
     "typescript": "^5.9.3"
   },
   "dependencies": {
+    "@ai-sdk/openai": "^2.0.53",
+    "@mastra/core": "^0.22.2",
+    "@mastra/memory": "^0.15.8",
+    "ai": "^5.0.78",
     "ccxt": "^4.5.12",
-    "dotenv": "^17.2.3"
+    "dotenv": "^17.2.3",
+    "zod": "^3.25.76"
   }
 }
