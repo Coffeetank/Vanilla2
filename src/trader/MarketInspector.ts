@@ -16,7 +16,7 @@ export interface MarketStats {
   high24h: number;
   low24h: number;
   volume24h: number;
-  volumeUSDC24h: number;
+  volumeUSDT24h: number;
   baseVolume: number;
   quoteVolume: number;
   timestamp: number;
@@ -305,11 +305,11 @@ export class BinanceMarketInspector {
   async getMarketStats(symbol: string): Promise<MarketStats> {
     const ticker = await this.exchange.fetchTicker(symbol);
 
-    // Convert to USDC volume
-    let volumeUSDC24h = ticker.quoteVolume || 0;
-    if (!symbol.includes('USDC') && !symbol.includes('USDT')) {
-      const usdcPrice = await this.getUSDCPrice(symbol);
-      volumeUSDC24h = (ticker.baseVolume || 0) * usdcPrice;
+    // Convert to USDT volume
+    let volumeUSDT24h = ticker.quoteVolume || 0;
+    if (!symbol.includes('USDT') && !symbol.includes('USDT')) {
+      const USDTPrice = await this.getUSDTPrice(symbol);
+      volumeUSDT24h = (ticker.baseVolume || 0) * USDTPrice;
     }
 
     return {
@@ -320,7 +320,7 @@ export class BinanceMarketInspector {
       high24h: ticker.high || 0,
       low24h: ticker.low || 0,
       volume24h: ticker.baseVolume || 0,
-      volumeUSDC24h,
+      volumeUSDT24h,
       baseVolume: ticker.baseVolume || 0,
       quoteVolume: ticker.quoteVolume || 0,
       timestamp: ticker.timestamp || Date.now()
@@ -341,8 +341,8 @@ export class BinanceMarketInspector {
     const stats: MarketStats[] = [];
 
     for (const [symbol, ticker] of Object.entries(tickers)) {
-      if (symbol.includes('USDC') || symbol.includes('USDT')) {
-        const volumeUSDC24h = ticker.quoteVolume || 0;
+      if (symbol.includes('USDT') || symbol.includes('USDT')) {
+        const volumeUSDT24h = ticker.quoteVolume || 0;
 
         stats.push({
           symbol,
@@ -352,7 +352,7 @@ export class BinanceMarketInspector {
           high24h: ticker.high || 0,
           low24h: ticker.low || 0,
           volume24h: ticker.baseVolume || 0,
-          volumeUSDC24h,
+          volumeUSDT24h,
           baseVolume: ticker.baseVolume || 0,
           quoteVolume: ticker.quoteVolume || 0,
           timestamp: ticker.timestamp || Date.now()
@@ -372,7 +372,7 @@ export class BinanceMarketInspector {
       .slice(0, limit);
 
     const volume = stats
-      .sort((a, b) => b.volumeUSDC24h - a.volumeUSDC24h)
+      .sort((a, b) => b.volumeUSDT24h - a.volumeUSDT24h)
       .slice(0, limit);
 
     return { gainers, losers, volume };
@@ -665,7 +665,7 @@ export class BinanceMarketInspector {
 
     // Volume score
     let volume = 0;
-    const avgVolume = marketStats.volumeUSDC24h / 24; // Rough hourly average
+    const avgVolume = marketStats.volumeUSDT24h / 24; // Rough hourly average
     if (avgVolume > 10000000) volume = 60; // High volume
     else if (avgVolume > 5000000) volume = 30;
     else if (avgVolume > 1000000) volume = 0;
@@ -760,15 +760,15 @@ export class BinanceMarketInspector {
   }
 
   // Utility Functions
-  private async getUSDCPrice(symbol: string): Promise<number> {
+  private async getUSDTPrice(symbol: string): Promise<number> {
     try {
-      if (symbol.includes('USDC') || symbol.includes('USDT')) return 1;
+      if (symbol.includes('USDT') || symbol.includes('USDT')) return 1;
 
       const baseAsset = symbol.split('/')[0];
 
-      // Try direct USDC pair first
+      // Try direct USDT pair first
       try {
-        const ticker = await this.exchange.fetchTicker(`${baseAsset}/USDC`);
+        const ticker = await this.exchange.fetchTicker(`${baseAsset}/USDT`);
         return ticker.last || ticker.close || 0;
       } catch {
         // Fallback to USDT
@@ -778,12 +778,12 @@ export class BinanceMarketInspector {
         } catch {
           // Fallback through BTC
           const btcTicker = await this.exchange.fetchTicker(`${baseAsset}/BTC`);
-          const btcUsdcTicker = await this.exchange.fetchTicker('BTC/USDC');
-          return (btcTicker.last || 0) * (btcUsdcTicker.last || 0);
+          const btcUSDTTicker = await this.exchange.fetchTicker('BTC/USDT');
+          return (btcTicker.last || 0) * (btcUSDTTicker.last || 0);
         }
       }
     } catch (error) {
-      console.warn(`Could not get USDC price for ${symbol}:`, error);
+      console.warn(`Could not get USDT price for ${symbol}:`, error);
       return 0;
     }
   }
@@ -794,7 +794,7 @@ export class BinanceMarketInspector {
       .map(market => market?.symbol || '')
       .filter(symbol =>
         symbol.toLowerCase().includes(query.toLowerCase()) &&
-        (symbol.includes('/USDC') || symbol.includes('/USDT'))
+        (symbol.includes('/USDT') || symbol.includes('/USDT'))
       )
       .slice(0, 20);
   }
@@ -1043,7 +1043,7 @@ export class BinanceMarketInspector {
     const targetPrices = targetOHLCV.map(candle => Number(candle[4]));
 
     // Get price data for major assets
-    const correlationAssets = ['BTC/USDC', 'ETH/USDC', 'BNB/USDC', 'ADA/USDC', 'SOL/USDC'];
+    const correlationAssets = ['BTC/USDT', 'ETH/USDT', 'BNB/USDT', 'ADA/USDT', 'SOL/USDT'];
     const correlatedAssets = [];
 
     for (const asset of correlationAssets) {
@@ -1072,17 +1072,17 @@ export class BinanceMarketInspector {
     }
 
     // Calculate BTC and ETH correlations
-    const btcCorrelation = correlatedAssets.find(a => a.symbol === 'BTC/USDC')?.correlation || 0;
-    const ethCorrelation = correlatedAssets.find(a => a.symbol === 'ETH/USDC')?.correlation || 0;
+    const btcCorrelation = correlatedAssets.find(a => a.symbol === 'BTC/USDT')?.correlation || 0;
+    const ethCorrelation = correlatedAssets.find(a => a.symbol === 'ETH/USDT')?.correlation || 0;
 
     // Calculate beta (volatility relative to BTC)
     let marketBeta = 1;
     if (btcCorrelation !== 0) {
       const targetReturns = this.calculateReturns(targetPrices);
-      const btcPrices = correlatedAssets.find(a => a.symbol === 'BTC/USDC');
+      const btcPrices = correlatedAssets.find(a => a.symbol === 'BTC/USDT');
       if (btcPrices) {
         try {
-          const btcOHLCV = await this.exchange.fetchOHLCV('BTC/USDC', timeframe, undefined, limit);
+          const btcOHLCV = await this.exchange.fetchOHLCV('BTC/USDT', timeframe, undefined, limit);
           const btcPriceData = btcOHLCV.map(candle => Number(candle[4]));
           const btcReturns = this.calculateReturns(btcPriceData);
           marketBeta = this.calculateBeta(targetReturns, btcReturns);
@@ -1119,31 +1119,34 @@ export class BinanceMarketInspector {
       };
     }
 
-    const [cryptoPanicNews, tavilyAnalysis] = await Promise.all([
+    const [cryptoPanicNews, tavilyAnalysis] = await Promise.allSettled([
       this.fetchCryptoPanicNews(baseAsset),
       this.fetchTavilyAnalysis(baseAsset)
+    ]).then(results => [
+      results[0].status === 'fulfilled' ? results[0].value : [],
+      results[1].status === 'fulfilled' ? results[1].value : []
     ]);
 
-    // Just format the raw data without analysis
-    const recentNews = cryptoPanicNews.map(news => ({
-      id: news.id,
-      headline: news.title,
-      summary: news.summary,
-      source: news.source.title,
-      timestamp: new Date(news.published_at).getTime(),
-      url: news.url,
-      votes: news.votes,
+    // Just format the raw data without analysis - ensure cryptoPanicNews is properly typed
+    const recentNews = (cryptoPanicNews as any[]).map((news: any) => ({
+      id: news.id || '',
+      headline: news.title || '',
+      summary: news.summary || '',
+      source: news.source?.title || 'Unknown',
+      timestamp: news.published_at ? new Date(news.published_at).getTime() : Date.now(),
+      url: news.url || '',
+      votes: news.votes || { positive: 0, negative: 0, important: 0 },
       rawData: news // Store original response for LLM analysis
     }));
 
     // Process Tavily market analysis - keep full content
-    const marketAnalysis = tavilyAnalysis.map(item => ({
-      headline: item.title,
-      content: item.content, // Full content, not truncated
-      source: new URL(item.url).hostname,
+    const marketAnalysis = (tavilyAnalysis as any[]).map((item: any) => ({
+      headline: item.title || '',
+      content: item.content || '', // Full content, not truncated
+      source: item.url ? new URL(item.url).hostname : 'Unknown',
       timestamp: item.published_date ? new Date(item.published_date).getTime() : Date.now(),
-      relevanceScore: item.score,
-      url: item.url,
+      relevanceScore: item.score || 0,
+      url: item.url || '',
       rawData: item // Store original response for LLM analysis
     }));
 
@@ -1181,6 +1184,10 @@ export class BinanceMarketInspector {
       );
 
       if (!response.ok) {
+        if (response.status === 429) {
+          console.warn(`⚠️ CryptoPanic API rate limited (429). Using cached data or skipping news for ${asset}.`);
+          return [];
+        }
         throw new Error(`CryptoPanic API error: ${response.status}`);
       }
 
@@ -1307,58 +1314,77 @@ export class BinanceMarketInspector {
   }
 
   // Ultra Comprehensive Market Analysis
-  async getUltraMarketAnalysis(symbol: string): Promise<{
-    marketStats: MarketStats;
-    orderBookAnalysis: OrderBookAnalysis;
-    tradeStats: TradeStats;
-    chartAnalysis: ChartAnalysis;
-    sentiment: MarketSentiment;
-    technicalIndicators: TechnicalIndicators;
-    volumeAnalysis: VolumeAnalysis;
-    marketDepth: MarketDepthAnalysis;
-    fundingAndFees: FundingAndFees;
-    correlation: MarketCorrelation;
-    newsAndEvents: NewsAndEvents;
+  async getMarketOverviewSummary(symbol: string): Promise<{
+    symbol: string;
+    price: number;
+    change24h: number;
+    changePercent24h: number;
+    volume24hUSDT: number;
+    sentiment: string;
+    technicalSignal: string;
+    rsi: number;
+    trend: string;
+    support: number;
+    resistance: number;
+    recommendation: string;
   }> {
-    const [
-      marketStats,
-      orderBookAnalysis,
-      tradeStats,
-      chartAnalysis,
-      sentiment,
-      technicalIndicators,
-      volumeAnalysis,
-      marketDepth,
-      fundingAndFees,
-      correlation,
-      newsAndEvents
-    ] = await Promise.all([
-      this.getMarketStats(symbol),
-      this.getOrderBookAnalysis(symbol),
-      this.getTradeStats(symbol),
-      this.getChartAnalysis(symbol),
-      this.getMarketSentiment(symbol),
-      this.getTechnicalIndicators(symbol),
-      this.getVolumeAnalysis(symbol),
-      this.getMarketDepthAnalysis(symbol),
-      this.getFundingAndFees(symbol),
-      this.getMarketCorrelation(symbol),
-      this.getNewsAndEvents(symbol)
-    ]);
+    try {
+      const results = await Promise.allSettled([
+        this.getMarketStats(symbol),
+        this.getMarketSentiment(symbol),
+        this.getTechnicalIndicators(symbol, '1h')
+      ]);
 
-    return {
-      marketStats,
-      orderBookAnalysis,
-      tradeStats,
-      chartAnalysis,
-      sentiment,
-      technicalIndicators,
-      volumeAnalysis,
-      marketDepth,
-      fundingAndFees,
-      correlation,
-      newsAndEvents
-    };
+      const marketStats = results[0].status === 'fulfilled' ? results[0].value as any : null;
+      const sentiment = results[1].status === 'fulfilled' ? results[1].value as any : null;
+      const technicalIndicators = results[2].status === 'fulfilled' ? results[2].value as any : null;
+
+      const rsi = technicalIndicators?.rsi || 50;
+      const macdSignal = technicalIndicators?.macd?.signal || 'neutral';
+
+      // Simple technical signal
+      let technicalSignal = 'neutral';
+      if (rsi < 30 && macdSignal === 'bullish') technicalSignal = 'bullish';
+      else if (rsi > 70 && macdSignal === 'bearish') technicalSignal = 'bearish';
+      else if (rsi < 40) technicalSignal = 'oversold';
+      else if (rsi > 60) technicalSignal = 'overbought';
+
+      // Simple recommendation
+      let recommendation = 'hold';
+      if (technicalSignal === 'bullish' && sentiment?.sentiment === 'bullish') recommendation = 'buy';
+      else if (technicalSignal === 'bearish' && sentiment?.sentiment === 'bearish') recommendation = 'sell';
+
+      return {
+        symbol,
+        price: marketStats?.currentPrice || 0,
+        change24h: marketStats?.change24h || 0,
+        changePercent24h: marketStats?.changePercent24h || 0,
+        volume24hUSDT: marketStats?.volumeUSDT24h || 0,
+        sentiment: sentiment?.sentiment || 'neutral',
+        technicalSignal,
+        rsi,
+        trend: marketStats?.changePercent24h > 0 ? 'up' : 'down',
+        support: technicalIndicators?.support || marketStats?.low24h || 0,
+        resistance: technicalIndicators?.resistance || marketStats?.high24h || 0,
+        recommendation
+      };
+    } catch (error) {
+      console.error(`Error getting market overview for ${symbol}:`, error);
+      return {
+        symbol,
+        price: 0,
+        change24h: 0,
+        changePercent24h: 0,
+        volume24hUSDT: 0,
+        sentiment: 'neutral',
+        technicalSignal: 'neutral',
+        rsi: 50,
+        trend: 'neutral',
+        support: 0,
+        resistance: 0,
+        recommendation: 'hold'
+      };
+    }
   }
 
   // Helper Methods for Calculations
@@ -1485,5 +1511,52 @@ export class BinanceMarketInspector {
   private calculateVariance(values: number[]): number {
     const mean = values.reduce((a, b) => a + b, 0) / values.length;
     return values.reduce((sum, value) => sum + Math.pow(value - mean, 2), 0) / values.length;
+  }
+
+  // Chart Data Analysis
+  async getChartData(symbol: string, timeframe: string, limit: number = 100): Promise<any> {
+    try {
+      const ohlcv = await this.exchange.fetchOHLCV(symbol, timeframe, undefined, limit);
+
+      // Format the data for better readability
+      const chartData = ohlcv.map((candle, index) => ({
+        timestamp: candle[0],
+        datetime: new Date(candle[0]!).toISOString(),
+        open: Number(candle[1]),
+        high: Number(candle[2]),
+        low: Number(candle[3]),
+        close: Number(candle[4]),
+        volume: Number(candle[5]),
+        index: ohlcv.length - index // Most recent = 1, oldest = limit
+      })).reverse(); // Most recent first
+
+      // Calculate basic statistics
+      const prices = chartData.map(c => c.close);
+      const volumes = chartData.map(c => c.volume);
+      const high24h = Math.max(...prices);
+      const low24h = Math.min(...prices);
+      const priceChange = ((chartData[0].close - chartData[chartData.length - 1].close) / chartData[chartData.length - 1].close) * 100;
+
+      return {
+        symbol,
+        timeframe,
+        candleCount: chartData.length,
+        data: chartData,
+        summary: {
+          currentPrice: chartData[0].close,
+          high24h,
+          low24h,
+          priceChange: parseFloat(priceChange.toFixed(2)),
+          avgVolume: volumes.reduce((a, b) => a + b, 0) / volumes.length,
+          totalVolume: volumes.reduce((a, b) => a + b, 0)
+        }
+      };
+    } catch (error) {
+      return {
+        error: `Failed to fetch chart data: ${(error as Error).message}`,
+        symbol,
+        timeframe
+      };
+    }
   }
 }

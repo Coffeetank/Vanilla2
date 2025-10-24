@@ -1,5 +1,5 @@
 import 'dotenv/config';
-import { mastra } from './mastra.js';
+import { tradingAgent } from './trader/agent.js';
 import { BinanceMarginTrader } from './trader/MarginTrader.js';
 import { BinanceMarketInspector } from './trader/MarketInspector.js';
 import { initializeTools } from './trader/tools.js';
@@ -27,7 +27,7 @@ async function main() {
   initializeTools(trader, inspector);
 
   // Get the trading agent
-  const agent = mastra.getAgent('tradingAgent');
+  const agent = tradingAgent;
 
   // Create a conversation thread for memory
   const threadId = `trading-session-${Date.now()}`;

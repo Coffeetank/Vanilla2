@@ -101,8 +101,8 @@ class IntegrationTester {
     console.log('\n📊 Testing BinanceMarginTrader Functions\n');
 
     // Account & Balance Management
-    await this.testFunction('getAvailableUSDC', async () => {
-      return await this.marginTrader.getAvailableUSDC();
+    await this.testFunction('getAvailableUSDT', async () => {
+      return await this.marginTrader.getAvailableUSDT();
     });
 
     await this.testFunction('getBalance', async () => {

@@ -1,4 +1,5 @@
 import ccxt, { binance } from 'ccxt';
+import crypto from 'crypto';
 
 export interface MarginConfig {
   apiKey: string;
@@ -34,8 +35,8 @@ export interface PositionInfo {
   pnl: number;
   pnlPercentage: number;
   marginMode: string;
-  notionalUSDC?: number;
-  unrealizedPnlUSDC?: number;
+  notionalUSDT?: number;
+  unrealizedPnlUSDT?: number;
 }
 
 export interface ExitPlan {
@@ -58,6 +59,9 @@ export interface InvalidationCondition {
 export class BinanceMarginTrader {
   private exchange: binance;
   private defaultMarginMode: 'cross' | 'isolated';
+  private apiKey: string;
+  private apiSecret: string;
+  private baseUrl: string;
 
   constructor(config: MarginConfig) {
     this.exchange = new ccxt.binance({
@@ -66,10 +70,112 @@ export class BinanceMarginTrader {
       sandbox: config.sandbox || false,
       options: {
         defaultType: 'margin',
-        defaultMarginMode: config.marginMode || 'cross'
+        defaultMarginMode: config.marginMode || 'cross',
+        warnOnFetchOpenOrdersWithoutSymbol: false
       }
     });
     this.defaultMarginMode = config.marginMode || 'cross';
+    this.apiKey = config.apiKey;
+    this.apiSecret = config.secret;
+    this.baseUrl = config.sandbox ? 'https://testnet.binance.vision' : 'https://api.binance.com';
+  }
+
+  /**
+   * Sign a request with HMAC-SHA256 signature for Binance API
+   */
+  private signRequest(params: Record<string, any>): string {
+    const queryString = Object.entries(params)
+      .map(([key, value]) => `${key}=${encodeURIComponent(value)}`)
+      .join('&');
+
+    const signature = crypto
+      .createHmac('sha256', this.apiSecret)
+      .update(queryString)
+      .digest('hex');
+
+    return `${queryString}&signature=${signature}`;
+  }
+
+  /**
+   * Make a signed POST request to Binance API
+   */
+  private async makeSignedRequest(endpoint: string, params: Record<string, any>): Promise<any> {
+    const signedParams = this.signRequest(params);
+    const url = `${this.baseUrl}${endpoint}?${signedParams}`;
+
+    const response = await fetch(url, {
+      method: 'POST',
+      headers: {
+        'X-MBX-APIKEY': this.apiKey,
+        'Content-Type': 'application/x-www-form-urlencoded'
+      }
+    });
+
+    if (!response.ok) {
+      const errorData = await response.text();
+      throw new Error(`Binance API error: ${response.status} ${response.statusText} - ${errorData}`);
+    }
+
+    return await response.json();
+  }
+
+  /**
+   * Round number to specified decimal places
+   */
+  private roundToDecimals(value: number, decimals: number): number {
+    const multiplier = Math.pow(10, decimals);
+    return Math.round(value * multiplier) / multiplier;
+  }
+
+  /**
+   * Strip trailing zeros and decimal point from a number string
+   */
+  private stripTrailingZeros(numStr: string): string {
+    if (!numStr || !numStr.includes('.')) return numStr;
+    // Remove trailing zeros but keep at least one digit after decimal if needed
+    let result = numStr.replace(/0+$/, '');
+    if (result.endsWith('.')) {
+      result = result.slice(0, -1);
+    }
+    // If result becomes empty or just a decimal, return the original
+    if (!result || result === '.') return numStr;
+    return result;
+  }
+
+  /**
+   * Format quantity and price values to match Binance precision requirements
+   */
+  private async formatOrderValues(symbol: string, quantity: number, price?: number): Promise<{
+    quantity: string;
+    price?: string;
+  }> {
+    try {
+      const markets = await this.exchange.loadMarkets();
+      const market = markets[symbol];
+
+      if (!market) {
+        // Fallback to reasonable defaults
+        return {
+          quantity: this.stripTrailingZeros(quantity.toFixed(6)),
+          price: price ? this.stripTrailingZeros(price.toFixed(2)) : undefined
+        };
+      }
+
+      // Get precision from market limits
+      const amountPrecision = market.precision?.amount || 8;
+      const pricePrecision = market.precision?.price || 2;
+
+      return {
+        quantity: this.stripTrailingZeros(this.roundToDecimals(quantity, amountPrecision).toFixed(amountPrecision)),
+        price: price ? this.stripTrailingZeros(this.roundToDecimals(price, pricePrecision).toFixed(pricePrecision)) : undefined
+      };
+    } catch (error) {
+      console.warn(`Could not get market precision for ${symbol}, using defaults`);
+      return {
+        quantity: this.stripTrailingZeros(quantity.toFixed(6)),
+        price: price ? this.stripTrailingZeros(price.toFixed(2)) : undefined
+      };
+    }
   }
 
   // Account & Balance Management
@@ -80,7 +186,7 @@ export class BinanceMarginTrader {
     });
   }
 
-  async getAvailableUSDC(): Promise<{
+  async getAvailableUSDT(): Promise<{
     total: number;
     free: number;
     used: number;
@@ -89,18 +195,19 @@ export class BinanceMarginTrader {
     netAvailable: number;
   }> {
     const balance = await this.getBalance();
-    const usdcBalance = balance['USDC'] || balance['USDT'] || { total: 0, free: 0, used: 0 };
+    // Use USDT as the primary stablecoin
+    const usdtBalance = balance['USDT'] || { total: 0, free: 0, used: 0 };
 
-    // Get USDC/USDT asset info for borrowed amounts
-    const usdcInfo = balance.info?.userAssets?.['USDC'] || balance.info?.userAssets?.['USDT'] || {};
+    // Get USDT asset info for borrowed amounts
+    const usdtInfo = balance.info?.userAssets?.['USDT'] || {};
 
     return {
-      total: usdcBalance.total || 0,
-      free: usdcBalance.free || 0,
-      used: usdcBalance.used || 0,
-      borrowed: parseFloat(usdcInfo.borrowed || '0'),
-      interest: parseFloat(usdcInfo.interest || '0'),
-      netAvailable: (usdcBalance.free || 0) - parseFloat(usdcInfo.borrowed || '0') - parseFloat(usdcInfo.interest || '0')
+      total: usdtBalance.total || 0,
+      free: usdtBalance.free || 0,
+      used: usdtBalance.used || 0,
+      borrowed: parseFloat(usdtInfo.borrowed || '0'),
+      interest: parseFloat(usdtInfo.interest || '0'),
+      netAvailable: (usdtBalance.free || 0) - parseFloat(usdtInfo.borrowed || '0') - parseFloat(usdtInfo.interest || '0')
     };
   }
 
@@ -112,6 +219,11 @@ export class BinanceMarginTrader {
     amount: number,
     options: OrderOptions = {}
   ): Promise<any> {
+    // If leverage is specified, handle borrowing first
+    if (options.leverage && options.leverage > 1) {
+      return await this.createLeveragedOrder(symbol, 'market', side, amount, undefined, options);
+    }
+
     const params = this.buildOrderParams(options);
     return await this.exchange.createOrder(symbol, 'market', side, amount, undefined, params);
   }
@@ -149,11 +261,17 @@ export class BinanceMarginTrader {
     stopPrice: number,
     options: OrderOptions = {}
   ): Promise<any> {
+    // For margin trading, use STOP_LOSS_LIMIT with a limit price that executes immediately
+    // Set limit price 5% away from stop to ensure execution
+    const limitPriceOffset = side === 'sell' ? 0.95 : 1.05;
+    const limitPrice = stopPrice * limitPriceOffset;
+
     const params = {
       ...this.buildOrderParams(options),
-      triggerPrice: stopPrice
+      stopPrice: stopPrice,
     };
-    return await this.exchange.createOrder(symbol, 'STOP_LOSS', side, amount, undefined, params);
+
+    return await this.exchange.createOrder(symbol, 'STOP_LOSS_LIMIT', side, amount, limitPrice, params);
   }
 
   async createTrailingStopOrder(
@@ -176,56 +294,119 @@ export class BinanceMarginTrader {
     amount: number,
     ocoOptions: OCOOrderOptions
   ): Promise<any> {
-    // OCO orders need to be created using Binance's specific API
-    // We'll create two separate orders: a limit order and a stop-limit order
     try {
-      const marginMode = ocoOptions.marginMode || this.defaultMarginMode;
+      console.log(`📋 Creating native Binance OCO order for ${symbol}`);
+      console.log(`   Take-profit: ${ocoOptions.limitPrice}, Stop-loss trigger: ${ocoOptions.stopPrice}`);
 
-      // Use Binance's raw API for OCO orders
-      const ocoParams: any = {
-        symbol: symbol.replace('/', ''),
-        side: side.toUpperCase(),
-        quantity: amount.toString(),
-        price: ocoOptions.limitPrice.toString(),
-        stopPrice: ocoOptions.stopPrice.toString(),
-        isIsolated: marginMode === 'isolated' ? 'TRUE' : 'FALSE'
+      // Format values to correct precision
+      console.log(`🔍 Input values: amount=${amount}, limitPrice=${ocoOptions.limitPrice}, stopPrice=${ocoOptions.stopPrice}`);
+
+      const formatted = await this.formatOrderValues(symbol, amount, ocoOptions.limitPrice);
+      const formattedStopPrice = (await this.formatOrderValues(symbol, 1, ocoOptions.stopPrice)).price; // Use 1 instead of 0 for price formatting
+
+      console.log(`🔍 Formatted values: quantity=${formatted.quantity}, price=${formatted.price}, stopPrice=${formattedStopPrice}`);
+
+      // Binance margin OCO requires stopLimitPrice (cannot use stop-market)
+      // If not provided, set it slightly worse than stopPrice to ensure execution
+      let stopLimitPrice = ocoOptions.stopLimitPrice;
+      if (!stopLimitPrice) {
+        // For SELL: stopLimitPrice should be slightly below stopPrice (worse price for seller)
+        // For BUY: stopLimitPrice should be slightly above stopPrice (worse price for buyer)
+        const offset = side === 'sell' ? 0.99 : 1.01; // 1% worse than stop trigger
+        stopLimitPrice = ocoOptions.stopPrice * offset;
+        console.log(`   Auto-calculated stop-limit price: ${stopLimitPrice} (${offset > 1 ? 'above' : 'below'} stop trigger)`);
+      }
+      const formattedStopLimit = (await this.formatOrderValues(symbol, 1, stopLimitPrice)).price; // Use 1 for price formatting
+
+      // Prepare parameters for Binance margin OCO API
+      const params: Record<string, any> = {
+        symbol: symbol.replace('/', ''), // BTC/USDT -> BTCUSDT
+        side: side.toUpperCase(), // BUY or SELL
+        quantity: formatted.quantity,
+        price: formatted.price, // Take-profit limit price
+        stopPrice: formattedStopPrice, // Stop-loss trigger price
+        stopLimitPrice: formattedStopLimit, // Stop-loss limit price (required for margin OCO)
+        stopLimitTimeInForce: 'GTC',
+        sideEffectType: 'NO_SIDE_EFFECT', // We already borrowed when opening the position
+        isIsolated: (ocoOptions.marginMode || this.defaultMarginMode) === 'isolated' ? 'TRUE' : 'FALSE',
+        timestamp: Date.now()
       };
 
-      if (ocoOptions.stopLimitPrice) {
-        ocoParams.stopLimitPrice = ocoOptions.stopLimitPrice.toString();
-        ocoParams.stopLimitTimeInForce = 'GTC';
+      console.log(`🔍 OCO params:`, {
+        symbol: params.symbol,
+        side: params.side,
+        quantity: params.quantity,
+        price: params.price,
+        stopPrice: params.stopPrice,
+        stopLimitPrice: params.stopLimitPrice
+      });
+
+      // Validate that all required parameters are present and valid
+      if (!params.quantity || !params.price || !params.stopPrice || !params.stopLimitPrice) {
+        throw new Error(`Missing required OCO parameters: ${JSON.stringify({
+          quantity: params.quantity,
+          price: params.price,
+          stopPrice: params.stopPrice,
+          stopLimitPrice: params.stopLimitPrice
+        })}`);
       }
 
-      // Use the exchange's private API to create OCO order
-      const response = await (this.exchange as any).marginPostOrder({
-        ...ocoParams,
-        type: 'OCO'
-      });
+      // Call Binance's native margin OCO endpoint
+      const response = await this.makeSignedRequest('/sapi/v1/margin/order/oco', params);
 
-      return response;
-    } catch (error) {
-      // Fallback: create two separate orders manually
-      console.warn('OCO order failed, creating separate orders:', error);
+      console.log(`✅ OCO order created successfully!`);
+      console.log(`   Order List ID: ${response.orderListId}`);
+      console.log(`   Orders: ${response.orders?.length || 0} orders placed atomically`);
 
-      const limitOrder = await this.createLimitOrder(symbol, side, amount, ocoOptions.limitPrice, {
-        marginMode: ocoOptions.marginMode
-      });
-
-      const stopOrder = await this.createStopLimitOrder(
+      return {
+        type: 'native_oco',
+        orderListId: response.orderListId,
+        contingencyType: response.contingencyType,
+        listStatusType: response.listStatusType,
+        listOrderStatus: response.listOrderStatus,
+        orders: response.orders,
+        orderReports: response.orderReports,
         symbol,
         side,
         amount,
-        ocoOptions.stopLimitPrice || ocoOptions.stopPrice,
-        ocoOptions.stopPrice,
-        { marginMode: ocoOptions.marginMode }
-      );
-
-      return {
-        type: 'manual_oco',
-        limitOrder,
-        stopOrder,
-        warning: 'Created as separate orders due to API limitations'
+        takeProfitPrice: ocoOptions.limitPrice,
+        stopLossPrice: ocoOptions.stopPrice,
+        message: `✅ OCO order placed successfully with ${response.orders?.length || 0} legs`
       };
+    } catch (error) {
+      console.error('❌ Failed to create native OCO order:', error);
+
+      // Fallback to separate orders if OCO fails
+      console.log('⚠️ Falling back to separate stop-loss and take-profit orders...');
+
+      const marginMode = ocoOptions.marginMode || this.defaultMarginMode;
+
+      try {
+        // Create stop-loss order first (more important)
+        const stopLossOrder = await this.createStopMarketOrder(symbol, side, amount, ocoOptions.stopPrice, {
+          marginMode,
+          reduceOnly: true
+        });
+        console.log(`✅ Stop-loss order placed at ${ocoOptions.stopPrice}`);
+
+        // Create take-profit limit order
+        const takeProfitOrder = await this.createLimitOrder(symbol, side, amount, ocoOptions.limitPrice, {
+          marginMode,
+          reduceOnly: true
+        });
+        console.log(`✅ Take-profit order placed at ${ocoOptions.limitPrice}`);
+
+        return {
+          type: 'separate_orders',
+          stopLossOrder,
+          takeProfitOrder,
+          message: 'Created stop-loss and take-profit as separate orders (fallback method)',
+          originalError: (error as Error).message
+        };
+      } catch (fallbackError) {
+        console.error('❌ Fallback also failed:', fallbackError);
+        throw new Error(`Failed to create protective orders: ${(fallbackError as Error).message}. Original OCO error: ${(error as Error).message}`);
+      }
     }
   }
 
@@ -264,35 +445,69 @@ export class BinanceMarginTrader {
     const balance = await this.getBalance();
     const positions: PositionInfo[] = [];
 
-    for (const [asset, assetData] of Object.entries(balance.info.userAssets || {})) {
+    for (const [_id, assetData] of Object.entries(balance.info.userAssets || {})) {
       const positionData = assetData as any;
+      const asset = positionData.asset; // Get the actual asset symbol from the data
       const netAsset = parseFloat(positionData.netAsset || '0');
 
-      if (netAsset !== 0) {
-        // Get recent trades to calculate average entry price
-        const entryPrice = await this.calculateAverageEntryPrice(asset);
-        const markPrice = await this.getCurrentPrice(asset);
+      // Skip if no position
+      if (netAsset === 0) continue;
 
-        // Get USDC price for conversions
-        const usdcPrice = await this.getUSDCPrice(asset);
-        const notionalUSDC = Math.abs(netAsset) * markPrice * usdcPrice;
-        const unrealizedPnlUSDC = this.calculatePnL(netAsset, entryPrice, markPrice) * usdcPrice;
+      // Skip if no valid asset symbol
+      if (!asset || asset.length < 2) {
+        continue;
+      }
+
+      // Skip common quote/stable assets that aren't traded positions
+      if (['USDT', 'USDC', 'BUSD', 'USD'].includes(asset)) {
+        continue;
+      }
+
+      try {
+        // Construct proper trading symbol
+        const symbol = asset.includes('/') ? asset : `${asset}/USDT`;
+        const [, quoteAsset] = symbol.split('/');
+
+        // Get recent trades to calculate average entry price
+        const entryPrice = await this.calculateAverageEntryPrice(symbol);
+        const markPrice = await this.getCurrentPrice(symbol);
+
+        // Calculate notional and P&L in quote currency
+        const notional = Math.abs(netAsset) * markPrice;
+        const pnl = this.calculatePnL(netAsset, entryPrice, markPrice);
+
+        // Convert to USDT if quote currency is not USDT
+        let notionalUSDT: number;
+        let unrealizedPnlUSDT: number;
+
+        if (quoteAsset === 'USDT') {
+          // Already in USDT, no conversion needed
+          notionalUSDT = notional;
+          unrealizedPnlUSDT = pnl;
+        } else {
+          // Need to convert from quote currency to USDT
+          const USDTPrice = await this.getUSDTPrice(quoteAsset);
+          notionalUSDT = notional * USDTPrice;
+          unrealizedPnlUSDT = pnl * USDTPrice;
+        }
 
         const position: PositionInfo = {
-          symbol: asset,
+          symbol: symbol,
           side: netAsset > 0 ? 'long' : 'short',
           size: Math.abs(netAsset),
-          notional: Math.abs(netAsset) * markPrice,
+          notional: notional,
           entryPrice: entryPrice,
           markPrice: markPrice,
-          pnl: this.calculatePnL(netAsset, entryPrice, markPrice),
+          pnl: pnl,
           pnlPercentage: this.calculatePnLPercentage(netAsset, entryPrice, markPrice),
           marginMode: this.defaultMarginMode,
-          notionalUSDC: notionalUSDC,
-          unrealizedPnlUSDC: unrealizedPnlUSDC,
+          notionalUSDT: notionalUSDT,
+          unrealizedPnlUSDT: unrealizedPnlUSDT,
         };
 
         positions.push(position);
+      } catch (error) {
+        console.warn(`Skipping asset ${asset} due to error:`, (error as Error).message);
       }
     }
 
@@ -347,28 +562,22 @@ export class BinanceMarginTrader {
     }
   }
 
-  private async getUSDCPrice(asset: string): Promise<number> {
+  private async getUSDTPrice(asset: string): Promise<number> {
     try {
-      if (asset === 'USDC' || asset === 'USDT') return 1;
+      if (asset === 'USDT' || asset === 'USDC' || asset === 'BUSD') return 1;
 
-      // Try direct USDC pair first
+      // Try direct USDT pair first
       try {
-        const ticker = await this.exchange.fetchTicker(`${asset}/USDC`);
+        const ticker = await this.exchange.fetchTicker(`${asset}/USDT`);
         return ticker.last || ticker.close || 0;
       } catch {
-        // Fallback to USDT pair
-        try {
-          const ticker = await this.exchange.fetchTicker(`${asset}/USDT`);
-          return ticker.last || ticker.close || 0;
-        } catch {
-          // Fallback through BTC
-          const assetBtc = await this.exchange.fetchTicker(`${asset}/BTC`);
-          const btcUsdc = await this.exchange.fetchTicker('BTC/USDC');
-          return (assetBtc.last || 0) * (btcUsdc.last || 0);
-        }
+        // Fallback through BTC
+        const assetBtc = await this.exchange.fetchTicker(`${asset}/BTC`);
+        const btcUSDT = await this.exchange.fetchTicker('BTC/USDT');
+        return (assetBtc.last || 0) * (btcUSDT.last || 0);
       }
     } catch (error) {
-      console.warn(`Could not get USDC price for ${asset}:`, error);
+      console.warn(`Could not get USDT price for ${asset}:`, error);
       return 0;
     }
   }
@@ -388,9 +597,10 @@ export class BinanceMarginTrader {
     return pnlPercentage;
   }
 
-  async closePosition(symbol: string): Promise<any> {
+  async closePosition(symbol: string, options: { autoRepay?: boolean } = {}): Promise<any> {
     const balance = await this.getBalance();
     const baseAsset = symbol.split('/')[0];
+    const quoteAsset = symbol.split('/')[1];
     const position = balance[baseAsset];
 
     if (!position || position.total === 0) {
@@ -399,8 +609,88 @@ export class BinanceMarginTrader {
 
     const side = position.total > 0 ? 'sell' : 'buy';
     const amount = Math.abs(position.total);
+    const isLong = position.total > 0;
 
-    return await this.createMarketOrder(symbol, side, amount, { reduceOnly: true });
+    // Check if position is dust (below minimum order size)
+    try {
+      const markets = await this.exchange.loadMarkets();
+      const market = markets[symbol];
+      const minAmount = market?.limits?.amount?.min || 0;
+
+      if (minAmount > 0 && amount < minAmount) {
+        console.log(`⚠️ Position too small to close: ${amount.toFixed(6)} ${baseAsset} (minimum: ${minAmount} ${baseAsset})`);
+        return {
+          status: 'dust_position',
+          symbol,
+          amount,
+          minAmount,
+          warning: `Position size ${amount.toFixed(6)} ${baseAsset} is below minimum tradeable amount of ${minAmount} ${baseAsset}. This is dust and cannot be closed.`,
+          suggestion: 'Consider leaving this dust position or manually converting through Binance Convert feature'
+        };
+      }
+    } catch (error) {
+      console.warn(`⚠️ Could not check minimum order size for ${symbol}, attempting to close anyway`);
+    }
+
+    // Close the position
+    console.log(`📤 Closing ${isLong ? 'LONG' : 'SHORT'} position: ${amount.toFixed(6)} ${baseAsset}`);
+    const closeOrder = await this.createMarketOrder(symbol, side, amount, { reduceOnly: true });
+
+    const result: any = {
+      closeOrder,
+      autoRepay: options.autoRepay !== false // Default to true
+    };
+
+    // Auto-repay borrowed assets (default behavior)
+    if (options.autoRepay !== false) {
+      try {
+        // Get liabilities for the assets involved
+        const borrowedAsset = isLong ? quoteAsset : baseAsset;
+        const liability = await this.getLiabilityForAsset(borrowedAsset);
+
+        if (liability.total > 0) {
+          console.log(`💰 Auto-repaying ${liability.total.toFixed(6)} ${borrowedAsset} borrowed amount`);
+
+          // Ensure we have enough balance to repay
+          const currentBalance = await this.getBalance();
+          const available = currentBalance[borrowedAsset]?.free || 0;
+
+          if (available >= liability.total) {
+            const repayResult = await this.repayMargin(borrowedAsset, liability.total);
+            result.repayment = {
+              asset: borrowedAsset,
+              amount: liability.total,
+              status: 'success',
+              result: repayResult
+            };
+            console.log(`✅ Successfully repaid ${liability.total.toFixed(6)} ${borrowedAsset}`);
+          } else {
+            result.repayment = {
+              asset: borrowedAsset,
+              amount: liability.total,
+              status: 'insufficient_balance',
+              available,
+              needed: liability.total,
+              warning: `Only ${available.toFixed(6)} ${borrowedAsset} available, need ${liability.total.toFixed(6)}`
+            };
+            console.warn(`⚠️ Insufficient balance to repay ${borrowedAsset}: have ${available.toFixed(6)}, need ${liability.total.toFixed(6)}`);
+          }
+        } else {
+          result.repayment = {
+            status: 'no_debt',
+            message: `No ${borrowedAsset} debt to repay`
+          };
+        }
+      } catch (error) {
+        result.repayment = {
+          status: 'error',
+          error: (error as Error).message
+        };
+        console.error(`❌ Auto-repay failed:`, error);
+      }
+    }
+
+    return result;
   }
 
   async closeAllPositions(): Promise<any[]> {
@@ -482,7 +772,39 @@ export class BinanceMarginTrader {
         const totalNetAsset = parseFloat(balance.info.totalNetAssetOfBtc || '0');
         const totalLiability = parseFloat(balance.info.totalLiabilityOfBtc || '0');
 
-        // Cross margin typically allows up to 3:1 leverage, but depends on margin level
+        // If no existing debt, calculate based on collateral alone (3x leverage)
+        if (totalLiability === 0 || totalLiability < 0.00001) {
+          // No debt yet - can borrow up to 2x collateral (for 3x total exposure)
+          const maxBorrowBtc = totalNetAsset * 2; // 3x leverage = 1x collateral + 2x borrowed
+
+          // Convert from BTC terms to asset amount
+          let maxAdditionalBorrowAsset: number;
+          let assetPriceInBtc: number;
+
+          if (asset === 'USDT' || asset === 'USDC' || asset === 'BUSD') {
+            const btcPrice = await this.getCurrentPrice('BTC/USDT');
+            assetPriceInBtc = 1 / btcPrice;
+            maxAdditionalBorrowAsset = maxBorrowBtc / assetPriceInBtc;
+          } else {
+            const assetPrice = await this.getCurrentPrice(`${asset}/USDT`);
+            const btcPrice = await this.getCurrentPrice('BTC/USDT');
+            assetPriceInBtc = assetPrice / btcPrice;
+            maxAdditionalBorrowAsset = maxBorrowBtc / assetPriceInBtc;
+          }
+
+          return {
+            asset,
+            marginMode: 'cross',
+            totalNetAssetBtc: totalNetAsset,
+            totalLiabilityBtc: totalLiability,
+            currentMarginLevel: 'N/A (no debt)',
+            maxAdditionalBorrowBtc: maxBorrowBtc,
+            maxAdditionalBorrowAsset: maxAdditionalBorrowAsset,
+            assetPriceInBtc: assetPriceInBtc
+          };
+        }
+
+        // Has existing debt - check margin level for safety
         const safeMarginLevel = 1.5; // Keep above liquidation threshold
         const currentMarginLevel = marginLevel.marginLevel || 1;
 
@@ -501,10 +823,22 @@ export class BinanceMarginTrader {
         const maxTotalLiability = totalNetAsset / safeMarginLevel;
         const maxAdditionalBorrow = Math.max(0, maxTotalLiability - totalLiability);
 
-        // Get asset price to convert from BTC terms
-        const assetPrice = await this.getCurrentPrice(`${asset}/USDC`);
-        const btcPrice = await this.getCurrentPrice('BTC/USDC');
-        const assetInBtc = assetPrice / btcPrice;
+        // Convert from BTC terms to asset amount
+        let maxAdditionalBorrowAsset: number;
+        let assetPriceInBtc: number;
+
+        if (asset === 'USDT' || asset === 'USDC' || asset === 'BUSD') {
+          // For stablecoins, calculate price as 1 / BTC price
+          const btcPrice = await this.getCurrentPrice('BTC/USDT');
+          assetPriceInBtc = 1 / btcPrice;
+          maxAdditionalBorrowAsset = maxAdditionalBorrow / assetPriceInBtc;
+        } else {
+          // For other assets, get their USDT price and convert to BTC terms
+          const assetPrice = await this.getCurrentPrice(`${asset}/USDT`);
+          const btcPrice = await this.getCurrentPrice('BTC/USDT');
+          assetPriceInBtc = assetPrice / btcPrice;
+          maxAdditionalBorrowAsset = maxAdditionalBorrow / assetPriceInBtc;
+        }
 
         return {
           asset,
@@ -513,8 +847,8 @@ export class BinanceMarginTrader {
           totalLiabilityBtc: totalLiability,
           currentMarginLevel,
           maxAdditionalBorrowBtc: maxAdditionalBorrow,
-          maxAdditionalBorrowAsset: maxAdditionalBorrow / assetInBtc,
-          assetPriceInBtc: assetInBtc
+          maxAdditionalBorrowAsset: maxAdditionalBorrowAsset,
+          assetPriceInBtc: assetPriceInBtc
         };
       }
     } catch (error) {
@@ -669,6 +1003,193 @@ export class BinanceMarginTrader {
     return 'CRITICAL: Account will be liquidated soon';
   }
 
+  // Leveraged Order Management
+  async createLeveragedOrder(
+    symbol: string,
+    type: 'market' | 'limit',
+    side: 'buy' | 'sell',
+    amount: number,
+    price?: number,
+    options: OrderOptions = {}
+  ): Promise<any> {
+    const leverage = options.leverage || 1;
+
+    if (leverage <= 1) {
+      // No leverage needed, use regular order
+      const params = this.buildOrderParams(options);
+      return await this.exchange.createOrder(symbol, type, side, amount, price, params);
+    }
+
+    try {
+      // Calculate how much we need to borrow
+      const [baseAsset, quoteAsset] = symbol.split('/');
+      const borrowAsset = side === 'buy' ? quoteAsset : baseAsset;
+
+      // Get current price for calculations
+      const ticker = await this.exchange.fetchTicker(symbol);
+      const currentPrice = price || ticker.last || ticker.close || 0;
+
+      if (currentPrice <= 0) {
+        throw new Error(`Unable to determine current price for ${symbol}`);
+      }
+
+      // Check maximum borrowable amount first
+      const maxBorrowableResult = await this.getMaxBorrowable(borrowAsset);
+      const maxBorrowableAmount = typeof maxBorrowableResult === 'object' ?
+        (maxBorrowableResult.maxAdditionalBorrowAsset || maxBorrowableResult.maxBorrowable || 0) : maxBorrowableResult;
+
+      // Calculate total position value and required borrowing
+      const positionValue = side === 'buy' ? amount * currentPrice : amount;
+      const availableBalance = await this.getAvailableBalance(borrowAsset);
+
+      // Reserve buffer for protective orders (5 USDT minimum)
+      const protectiveOrderBuffer = Math.min(10, availableBalance * 0.1); // 10% or 10 USDT max
+      const usableBalance = Math.max(0, availableBalance - protectiveOrderBuffer);
+
+      const totalRequired = positionValue * leverage;
+      let borrowAmount = Math.max(0, totalRequired - usableBalance);
+
+      if (protectiveOrderBuffer > 0) {
+        console.log(`💰 Reserving ${protectiveOrderBuffer.toFixed(2)} ${borrowAsset} buffer for protective orders`);
+      }
+
+      // Adjust position size if borrowing exceeds limits
+      let adjustedAmount = amount;
+      if (borrowAmount > maxBorrowableAmount) {
+        console.log(`⚠️ Requested borrow (${borrowAmount.toFixed(2)} ${borrowAsset}) exceeds limit (${maxBorrowableAmount.toFixed(2)} ${borrowAsset})`);
+
+        // Calculate maximum position size with usable funds (after buffer) + max borrowing
+        const maxTotalFunds = usableBalance + maxBorrowableAmount;
+        const maxPositionValue = maxTotalFunds;
+        adjustedAmount = side === 'buy' ? maxPositionValue / currentPrice : maxPositionValue;
+
+        console.log(`📉 Adjusting position from ${amount.toFixed(6)} to ${adjustedAmount.toFixed(6)} ${baseAsset}`);
+
+        // Recalculate borrowing with adjusted amount
+        const adjustedPositionValue = side === 'buy' ? adjustedAmount * currentPrice : adjustedAmount;
+        borrowAmount = Math.max(0, adjustedPositionValue - usableBalance);
+      }
+
+      // Borrow if needed (within limits)
+      if (borrowAmount > 0) {
+        console.log(`🏦 Borrowing ${borrowAmount.toFixed(6)} ${borrowAsset} for ${leverage}x leverage`);
+        await this.exchange.borrowCrossMargin(borrowAsset, borrowAmount);
+      }
+
+      // Calculate total amount for the order (based on usable balance + borrowed funds)
+      // This preserves the protective order buffer in the account
+      const totalFunds = usableBalance + borrowAmount;
+      const totalAmount = side === 'buy' ? totalFunds / currentPrice : adjustedAmount;
+
+      // For MARKET orders: place without protection first, then add protective orders after execution
+      // For LIMIT orders: can include protection in the order params
+      let orderParams: any;
+      let needsPostProtection = false;
+
+      if (type === 'market' && (options.stopLoss || options.takeProfit)) {
+        // Market orders: can't include stop-loss/take-profit (Binance doesn't know execution price yet)
+        orderParams = this.buildOrderParams({
+          ...options,
+          stopLoss: undefined,
+          takeProfit: undefined
+        });
+        needsPostProtection = true;
+      } else {
+        // Limit orders or no protection: can include everything
+        orderParams = this.buildOrderParams(options);
+      }
+
+      const order = await this.exchange.createOrder(symbol, type, side, totalAmount, price, orderParams);
+
+      // For market orders, place protective orders after execution using actual fill price
+      let protectionResult = null;
+      if (needsPostProtection && order.status === 'closed') {
+        const actualPrice = order.average || order.price || currentPrice;
+        console.log(`✅ Order filled at ${actualPrice}`);
+
+        if (options.stopLoss && options.takeProfit) {
+          console.log(`🎯 Setting protective orders: Stop-loss ${options.stopLoss}, Take-profit ${options.takeProfit}`);
+          try {
+            const exitSide = side === 'buy' ? 'sell' : 'buy';
+
+            // Use native OCO API to place both orders atomically
+            const ocoResult = await this.createOCOOrder(symbol, exitSide, totalAmount, {
+              limitPrice: options.takeProfit,
+              stopPrice: options.stopLoss,
+              marginMode: options.marginMode || this.defaultMarginMode
+            });
+
+            protectionResult = {
+              oco: ocoResult,
+              status: 'oco_placed'
+            };
+          } catch (error) {
+            console.warn(`⚠️ Failed to set protective orders: ${(error as Error).message}`);
+            protectionResult = {
+              status: 'failed',
+              error: (error as Error).message
+            };
+          }
+        } else if (options.stopLoss) {
+          // Only stop-loss
+          try {
+            const exitSide = side === 'buy' ? 'sell' : 'buy';
+            const stopLossOrder = await this.createStopMarketOrder(symbol, exitSide, totalAmount, options.stopLoss, {
+              marginMode: options.marginMode || this.defaultMarginMode,
+              reduceOnly: true
+            });
+            console.log(`✅ Stop-loss placed at ${options.stopLoss}`);
+            protectionResult = { stopLoss: stopLossOrder, status: 'stop_only' };
+          } catch (error) {
+            console.warn(`⚠️ Failed to set stop-loss: ${(error as Error).message}`);
+            protectionResult = { status: 'failed', error: (error as Error).message };
+          }
+        } else if (options.takeProfit) {
+          // Only take-profit
+          try {
+            const exitSide = side === 'buy' ? 'sell' : 'buy';
+            const takeProfitOrder = await this.createLimitOrder(symbol, exitSide, totalAmount, options.takeProfit, {
+              marginMode: options.marginMode || this.defaultMarginMode,
+              reduceOnly: true
+            });
+            console.log(`✅ Take-profit placed at ${options.takeProfit}`);
+            protectionResult = { takeProfit: takeProfitOrder, status: 'tp_only' };
+          } catch (error) {
+            console.warn(`⚠️ Failed to set take-profit: ${(error as Error).message}`);
+            protectionResult = { status: 'failed', error: (error as Error).message };
+          }
+        }
+      } else if (needsPostProtection) {
+        console.warn(`⚠️ Order not filled immediately, skipping protective orders`);
+      } else if (options.stopLoss || options.takeProfit) {
+        console.log(`✅ Order placed with built-in protective levels`);
+      }
+
+      return {
+        ...order,
+        leverage: leverage,
+        borrowedAmount: borrowAmount,
+        borrowedAsset: borrowAsset,
+        originalAmount: amount,
+        adjustedAmount: adjustedAmount,
+        leveragedAmount: totalAmount,
+        stopLoss: options.stopLoss,
+        takeProfit: options.takeProfit,
+        protection: protectionResult,
+        positionAdjusted: adjustedAmount !== amount
+      };
+
+    } catch (error) {
+      console.error('❌ Leveraged order failed:', (error as Error).message);
+      throw error;
+    }
+  }
+
+  private async getAvailableBalance(asset: string): Promise<number> {
+    const balance = await this.getBalance();
+    return balance[asset]?.free || 0;
+  }
+
   // Utility Functions
   private buildOrderParams(options: OrderOptions): any {
     const params: any = {
@@ -724,31 +1245,6 @@ export class BinanceMarginTrader {
   }
 
   // Advanced Trading Functions
-  async createOrderWithTPSL(
-    symbol: string,
-    side: 'buy' | 'sell',
-    amount: number,
-    price?: number,
-    takeProfit?: number,
-    stopLoss?: number,
-    orderType: string = 'limit'
-  ): Promise<any> {
-    const mainOrder = await this.exchange.createOrder(
-      symbol,
-      orderType,
-      side,
-      amount,
-      price,
-      {
-        marginMode: this.defaultMarginMode,
-        takeProfitPrice: takeProfit,
-        stopLossPrice: stopLoss
-      }
-    );
-
-    return mainOrder;
-  }
-
   async scaledEntry(
     symbol: string,
     side: 'buy' | 'sell',
@@ -806,10 +1302,25 @@ export class BinanceMarginTrader {
     const currentPrice = position.markPrice;
     const entryPrice = position.entryPrice;
 
-    // Calculate potential P&L in USDC
-    const usdcPrice = await this.getUSDCPrice(symbol);
-    const targetPnl = position.size * (targetPrice - entryPrice) * (position.side === 'long' ? 1 : -1) * usdcPrice;
-    const stopPnl = position.size * (stopPrice - entryPrice) * (position.side === 'long' ? 1 : -1) * usdcPrice;
+    // Calculate potential P&L in USDT
+    const [, quoteAsset] = symbol.split('/');
+
+    // Calculate P&L in quote currency
+    const targetPnlQuote = position.size * (targetPrice - entryPrice) * (position.side === 'long' ? 1 : -1);
+    const stopPnlQuote = position.size * (stopPrice - entryPrice) * (position.side === 'long' ? 1 : -1);
+
+    // Convert to USDT if needed
+    let targetPnl: number;
+    let stopPnl: number;
+
+    if (quoteAsset === 'USDT') {
+      targetPnl = targetPnlQuote;
+      stopPnl = stopPnlQuote;
+    } else {
+      const USDTPrice = await this.getUSDTPrice(quoteAsset);
+      targetPnl = targetPnlQuote * USDTPrice;
+      stopPnl = stopPnlQuote * USDTPrice;
+    }
 
     // Calculate risk-reward ratio
     const riskAmount = Math.abs(entryPrice - stopPrice);
@@ -1019,28 +1530,44 @@ export class BinanceMarginTrader {
     totalOrderCount: number;
     pendingValue: number;
   }> {
-    const openOrders = await this.getOpenOrders();
     const positions = await this.getCurrentPositions();
 
-    // Get recent orders for all symbols that have positions
+    // Get open orders for all symbols that have positions
+    const openOrders = [];
     const recentOrders = [];
     const symbolsWithPositions = [...new Set(positions.map(p => p.symbol))];
 
     for (const symbol of symbolsWithPositions) {
       try {
-        const orders = await this.getOrderHistory(symbol, 20);
-        recentOrders.push(...orders);
+        const orders = await this.getOpenOrders(symbol);
+        openOrders.push(...orders);
+
+        const history = await this.getOrderHistory(symbol, 20);
+        recentOrders.push(...history);
       } catch (error) {
         console.warn(`Could not get orders for ${symbol}:`, error);
       }
     }
 
-    // Calculate pending value in USDC
+    // Calculate pending value in USDT
     let pendingValue = 0;
     for (const order of openOrders) {
       if (order.status === 'open' && order.remaining) {
-        const usdcPrice = await this.getUSDCPrice(order.symbol);
-        pendingValue += order.remaining * (order.price || 0) * usdcPrice;
+        try {
+          const [, quoteAsset] = order.symbol.split('/');
+          // Order value is: remaining * price (in quote currency)
+          const orderValueQuote = order.remaining * (order.price || 0);
+
+          // Convert to USDT if needed
+          if (quoteAsset === 'USDT') {
+            pendingValue += orderValueQuote;
+          } else {
+            const USDTPrice = await this.getUSDTPrice(quoteAsset);
+            pendingValue += orderValueQuote * USDTPrice;
+          }
+        } catch (error) {
+          console.warn(`Could not calculate pending value for ${order.symbol}:`, error);
+        }
       }
     }
 
@@ -1059,7 +1586,19 @@ export class BinanceMarginTrader {
     marketOrders: any[];
     ocoOrders: any[];
   }> {
-    const openOrders = await this.getOpenOrders();
+    // Get all positions to fetch orders for their symbols
+    const positions = await this.getCurrentPositions();
+    const symbolsWithPositions = [...new Set(positions.map(p => p.symbol))];
+
+    const openOrders = [];
+    for (const symbol of symbolsWithPositions) {
+      try {
+        const orders = await this.getOpenOrders(symbol);
+        openOrders.push(...orders);
+      } catch (error) {
+        console.warn(`Could not get orders for ${symbol}:`, error);
+      }
+    }
 
     return {
       limitOrders: openOrders.filter((order: any) => order.type === 'limit'),
@@ -1126,8 +1665,8 @@ export class BinanceMarginTrader {
 
   async getPositionSummary(): Promise<{
     totalPositions: number;
-    totalNotionalUSDC: number;
-    totalUnrealizedPnlUSDC: number;
+    totalNotionalUSDT: number;
+    totalUnrealizedPnlUSDT: number;
     longPositions: PositionInfo[];
     shortPositions: PositionInfo[];
     biggestWinner: PositionInfo | null;
@@ -1138,29 +1677,29 @@ export class BinanceMarginTrader {
     const longPositions = positions.filter(p => p.side === 'long');
     const shortPositions = positions.filter(p => p.side === 'short');
 
-    const totalNotionalUSDC = positions.reduce((sum, p) => sum + (p.notionalUSDC || 0), 0);
-    const totalUnrealizedPnlUSDC = positions.reduce((sum, p) => sum + (p.unrealizedPnlUSDC || 0), 0);
+    const totalNotionalUSDT = positions.reduce((sum, p) => sum + (p.notionalUSDT || 0), 0);
+    const totalUnrealizedPnlUSDT = positions.reduce((sum, p) => sum + (p.unrealizedPnlUSDT || 0), 0);
 
     // Find biggest winner and loser by unrealized PnL
     let biggestWinner: PositionInfo | null = null;
     let biggestLoser: PositionInfo | null = null;
 
     for (const position of positions) {
-      const pnl = position.unrealizedPnlUSDC || 0;
+      const pnl = position.unrealizedPnlUSDT || 0;
 
-      if (!biggestWinner || pnl > (biggestWinner.unrealizedPnlUSDC || 0)) {
+      if (!biggestWinner || pnl > (biggestWinner.unrealizedPnlUSDT || 0)) {
         biggestWinner = position;
       }
 
-      if (!biggestLoser || pnl < (biggestLoser.unrealizedPnlUSDC || 0)) {
+      if (!biggestLoser || pnl < (biggestLoser.unrealizedPnlUSDT || 0)) {
         biggestLoser = position;
       }
     }
 
     return {
       totalPositions: positions.length,
-      totalNotionalUSDC,
-      totalUnrealizedPnlUSDC,
+      totalNotionalUSDT,
+      totalUnrealizedPnlUSDT,
       longPositions,
       shortPositions,
       biggestWinner,
@@ -1168,51 +1707,203 @@ export class BinanceMarginTrader {
     };
   }
 
+  /**
+   * Check if a position has protective orders (stop-loss or take-profit)
+   */
+  async hasProtectiveOrders(symbol: string): Promise<{
+    hasStopLoss: boolean;
+    hasTakeProfit: boolean;
+    hasProtection: boolean;
+    orders: any[];
+  }> {
+    try {
+      const openOrders = await this.getOpenOrders(symbol);
+
+      let hasStopLoss = false;
+      let hasTakeProfit = false;
+
+      for (const order of openOrders) {
+        const orderType = order.type?.toLowerCase() || '';
+
+        // Check for stop-loss orders
+        if (orderType.includes('stop') && order.reduceOnly) {
+          hasStopLoss = true;
+        }
+
+        // Check for take-profit orders (limit orders that reduce position)
+        if (orderType === 'limit' && order.reduceOnly) {
+          // Determine if it's take-profit by checking if price is favorable
+          const positions = await this.getCurrentPositions();
+          const position = positions.find(p => p.symbol === symbol);
+
+          if (position) {
+            const isLong = position.side === 'long';
+            const orderPrice = order.price || 0;
+            const markPrice = position.markPrice;
+
+            // For long: take-profit is above current price
+            // For short: take-profit is below current price
+            if ((isLong && orderPrice > markPrice) || (!isLong && orderPrice < markPrice)) {
+              hasTakeProfit = true;
+            }
+          }
+        }
+      }
+
+      return {
+        hasStopLoss,
+        hasTakeProfit,
+        hasProtection: hasStopLoss || hasTakeProfit,
+        orders: openOrders
+      };
+    } catch (error) {
+      console.warn(`Could not check protective orders for ${symbol}:`, error);
+      return {
+        hasStopLoss: false,
+        hasTakeProfit: false,
+        hasProtection: false,
+        orders: []
+      };
+    }
+  }
+
+  /**
+   * Get all positions that lack protective orders
+   */
+  async getUnprotectedPositions(): Promise<Array<{
+    position: PositionInfo;
+    protection: {
+      hasStopLoss: boolean;
+      hasTakeProfit: boolean;
+    };
+  }>> {
+    const positions = await this.getCurrentPositions();
+    const unprotected = [];
+
+    for (const position of positions) {
+      const protection = await this.hasProtectiveOrders(position.symbol);
+
+      if (!protection.hasProtection) {
+        unprotected.push({
+          position,
+          protection: {
+            hasStopLoss: protection.hasStopLoss,
+            hasTakeProfit: protection.hasTakeProfit
+          }
+        });
+      }
+    }
+
+    return unprotected;
+  }
+
+  /**
+   * Add OCO protection to an existing position
+   */
+  async addProtectionToPosition(
+    symbol: string,
+    stopLossPrice: number,
+    takeProfitPrice: number
+  ): Promise<any> {
+    const positions = await this.getCurrentPositions();
+    const position = positions.find(p => p.symbol === symbol);
+
+    if (!position) {
+      throw new Error(`No position found for ${symbol}`);
+    }
+
+    // Check if position already has protection
+    const existingProtection = await this.hasProtectiveOrders(symbol);
+    if (existingProtection.hasProtection) {
+      console.warn(`⚠️ Position ${symbol} already has some protection orders`);
+      if (existingProtection.hasStopLoss && existingProtection.hasTakeProfit) {
+        return {
+          status: 'already_protected',
+          message: `Position already has both stop-loss and take-profit`,
+          existingOrders: existingProtection.orders
+        };
+      }
+    }
+
+    // Determine the side for closing the position
+    const exitSide = position.side === 'long' ? 'sell' : 'buy';
+
+    // Create OCO order
+    console.log(`🛡️ Adding protection to ${symbol} position (${position.size} ${position.side})`);
+    const ocoResult = await this.createOCOOrder(symbol, exitSide, position.size, {
+      limitPrice: takeProfitPrice,
+      stopPrice: stopLossPrice,
+      marginMode: this.defaultMarginMode
+    });
+
+    return {
+      status: 'protected',
+      position,
+      stopLossPrice,
+      takeProfitPrice,
+      ocoResult,
+      message: `✅ Added OCO protection: Stop-loss at ${stopLossPrice}, Take-profit at ${takeProfitPrice}`
+    };
+  }
+
   async getAccountOverview(): Promise<{
-    availableUSDC: any;
+    availableUSDT: any;
     positions: PositionInfo[];
     openOrders: any[];
     liabilities: any;
     marginLevel: any;
     liquidationRisk: any;
     summary: {
-      totalEquityUSDC: number;
-      totalPositionValueUSDC: number;
-      totalUnrealizedPnlUSDC: number;
-      freeMarginUSDC: number;
+      totalEquityUSDT: number;
+      totalPositionValueUSDT: number;
+      totalUnrealizedPnlUSDT: number;
+      freeMarginUSDT: number;
       marginUtilization: number;
     };
   }> {
+    // Get positions first to know which symbols to fetch orders for
+    const positions = await this.getCurrentPositions();
+    const symbolsWithPositions = [...new Set(positions.map(p => p.symbol))];
+
     // Get all account data
-    const [availableUSDC, positions, openOrders, liabilities, marginLevel, liquidationRisk] =
+    const [availableUSDT, liabilities, marginLevel, liquidationRisk] =
       await Promise.all([
-        this.getAvailableUSDC(),
-        this.getCurrentPositions(),
-        this.getOpenOrders(),
+        this.getAvailableUSDT(),
         this.getCurrentLiabilities(),
         this.getMarginLevel(),
         this.getLiquidationRisk()
       ]);
 
+    // Get open orders for all position symbols
+    const openOrders = [];
+    for (const symbol of symbolsWithPositions) {
+      try {
+        const orders = await this.getOpenOrders(symbol);
+        openOrders.push(...orders);
+      } catch (error) {
+        console.warn(`Could not get orders for ${symbol}:`, error);
+      }
+    }
+
     // Calculate summary
-    const totalPositionValueUSDC = positions.reduce((sum, p) => sum + (p.notionalUSDC || 0), 0);
-    const totalUnrealizedPnlUSDC = positions.reduce((sum, p) => sum + (p.unrealizedPnlUSDC || 0), 0);
-    const totalEquityUSDC = availableUSDC.netAvailable + totalPositionValueUSDC + totalUnrealizedPnlUSDC;
-    const freeMarginUSDC = availableUSDC.free;
-    const marginUtilization = totalPositionValueUSDC / (totalEquityUSDC || 1) * 100;
+    const totalPositionValueUSDT = positions.reduce((sum, p) => sum + (p.notionalUSDT || 0), 0);
+    const totalUnrealizedPnlUSDT = positions.reduce((sum, p) => sum + (p.unrealizedPnlUSDT || 0), 0);
+    const totalEquityUSDT = availableUSDT.netAvailable + totalPositionValueUSDT + totalUnrealizedPnlUSDT;
+    const freeMarginUSDT = availableUSDT.free;
+    const marginUtilization = totalPositionValueUSDT / (totalEquityUSDT || 1) * 100;
 
     return {
-      availableUSDC,
+      availableUSDT,
       positions,
       openOrders,
       liabilities,
       marginLevel,
       liquidationRisk,
       summary: {
-        totalEquityUSDC,
-        totalPositionValueUSDC,
-        totalUnrealizedPnlUSDC,
-        freeMarginUSDC,
+        totalEquityUSDT,
+        totalPositionValueUSDT,
+        totalUnrealizedPnlUSDT,
+        freeMarginUSDT,
         marginUtilization
       }
     };
