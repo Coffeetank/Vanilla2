@@ -311,12 +311,7 @@ export class BinanceMarketInspector {
     this.exchange = new ccxt.binance({
       apiKey: config.apiKey,
       secret: config.secret,
-      sandbox: config.sandbox || false,
-      options: {
-        defaultType: 'margin',
-        defaultMarginMode: 'cross',
-        warnOnFetchOpenOrdersWithoutSymbol: false
-      }
+      sandbox: config.sandbox || false
     });
     this.cryptoPanicApiKey = config.cryptoPanicApiKey;
     this.tavilyApiKey = config.tavilyApiKey;
@@ -325,46 +320,6 @@ export class BinanceMarketInspector {
     this.apiSecret = config.secret || '';
     this.baseUrl = config.sandbox ? 'https://testnet.binance.vision' : 'https://api.binance.com';
   }
-
-  /**
-   * Sign a request with HMAC-SHA256 signature for Binance API
-   */
-  private signRequest(params: Record<string, any>): string {
-    const queryString = Object.entries(params)
-      .map(([key, value]) => `${key}=${encodeURIComponent(value)}`)
-      .join('&');
-
-    const signature = crypto
-      .createHmac('sha256', this.apiSecret)
-      .update(queryString)
-      .digest('hex');
-
-    return `${queryString}&signature=${signature}`;
-  }
-
-  /**
-   * Make a signed POST request to Binance API
-   */
-  private async makeSignedRequest(endpoint: string, params: Record<string, any>): Promise<any> {
-    const signedParams = this.signRequest(params);
-    const url = `${this.baseUrl}${endpoint}?${signedParams}`;
-
-    const response = await fetch(url, {
-      method: 'POST',
-      headers: {
-        'X-MBX-APIKEY': this.apiKey,
-        'Content-Type': 'application/x-www-form-urlencoded'
-      }
-    });
-
-    if (!response.ok) {
-      const errorData = await response.text();
-      throw new Error(`Binance API error: ${response.status} ${response.statusText} - ${errorData}`);
-    }
-
-    return await response.json();
-  }
-
   // Account & Balance Inspection Functions
   async getBalance(marginMode?: 'cross' | 'isolated', symbols?: string[]): Promise<any> {
     return await this.exchange.fetchBalance({

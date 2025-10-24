@@ -35,6 +35,10 @@ export interface OpenPositionResult {
 export class MarketTrader {
   private client: MarginTrading;
   private rest: any;
+  
+  private toNativeSymbol(symbol: string): string {
+    return symbol.replace('/', '').toUpperCase();
+  }
 
   constructor(config: MarketTraderConfig) {
     this.client = new MarginTrading({
@@ -82,10 +86,11 @@ export class MarketTrader {
       stopLossPrice,
       stopLimitPrice,
     } = params;
+    const nativeSymbol = this.toNativeSymbol(symbol);
 
     // 1) Create primary order on cross margin
     const orderReq: any = {
-      symbol,
+      symbol: nativeSymbol,
       side,
       type,
       isIsolated: 'FALSE',
@@ -112,7 +117,7 @@ export class MarketTrader {
         : Number(orderRes?.executedQty ?? orderRes?.origQty ?? 0);
 
     const ocoReq: any = {
-      symbol,
+      symbol: nativeSymbol,
       side: ocoSide,
       quantity: ocoQuantity,
       price: takeProfitPrice,
@@ -143,15 +148,17 @@ export class MarketTrader {
 
   // ============ Order Management ============
   async cancelAllOpenOrdersOnSymbol(symbol: string) {
+    const nativeSymbol = this.toNativeSymbol(symbol);
     return this.rest
-      .marginAccountCancelAllOpenOrdersOnASymbol({ symbol })
+      .marginAccountCancelAllOpenOrdersOnASymbol({ symbol: nativeSymbol })
       .then((r: { data: () => unknown }) => r.data());
   }
 
   async cancelOrder(params: { symbol: string; orderId?: number; origClientOrderId?: string }) {
+    const nativeSymbol = this.toNativeSymbol(params.symbol);
     return this.rest
       .marginAccountCancelOrder({
-        symbol: params.symbol,
+        symbol: nativeSymbol,
         orderId: params.orderId,
         origClientOrderId: params.origClientOrderId,
         isIsolated: 'FALSE',
@@ -160,9 +167,10 @@ export class MarketTrader {
   }
 
   async cancelOco(params: { symbol: string; orderListId?: number; listClientOrderId?: string }) {
+    const nativeSymbol = this.toNativeSymbol(params.symbol);
     return this.rest
       .marginAccountCancelOco({
-        symbol: params.symbol,
+        symbol: nativeSymbol,
         orderListId: params.orderListId,
         listClientOrderId: params.listClientOrderId,
         isIsolated: 'FALSE',
@@ -180,8 +188,9 @@ export class MarketTrader {
     autoRepayAtCancel?: boolean;
   }) {
     const { symbol, side, quantity, takeProfitPrice, stopLossPrice, stopLimitPrice, autoRepayAtCancel = true } = params;
+    const nativeSymbol = this.toNativeSymbol(symbol);
     const req: any = {
-      symbol,
+      symbol: nativeSymbol,
       side,
       quantity,
       price: takeProfitPrice,
@@ -196,10 +205,11 @@ export class MarketTrader {
   }
 
   async getOpenOrders(symbol?: string) {
+    const nativeSymbol = symbol ? this.toNativeSymbol(symbol) : undefined;
     return this.rest
       .queryMarginAccountsOpenOrders({
-        symbol,
-        isIsolated: symbol ? 'FALSE' : undefined,
+        symbol: nativeSymbol,
+        isIsolated: nativeSymbol ? 'FALSE' : undefined,
       })
       .then((r: { data: () => unknown }) => r.data());
   }
@@ -215,8 +225,10 @@ export class MarketTrader {
   // Closing position by sending opposite MARKET order
   async closePositionMarket(symbol: string, sideToClose: OrderSide, quantity: number) {
     const side: OrderSide = sideToClose; // e.g., if long (BUY) then close with SELL
+    // Binance REST expects symbols without separators, e.g., TRXUSDT
+    const nativeSymbol = this.toNativeSymbol(symbol);
     const req: any = {
-      symbol,
+      symbol: nativeSymbol,
       side,
       type: 'MARKET',
       isIsolated: 'FALSE',
