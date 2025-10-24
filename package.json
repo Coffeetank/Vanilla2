@@ -21,6 +21,7 @@
     "typescript": "^5.9.3"
   },
   "dependencies": {
+    "@binance/margin-trading": "^7.0.2",
     "ccxt": "^4.5.12",
     "dotenv": "^17.2.3",
     "vm2": "^3.9.19",

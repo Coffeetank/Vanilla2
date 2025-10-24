@@ -1,7 +1,8 @@
 import 'dotenv/config';
 import { tradingAgent } from './trader/agent.js';
 import { BinanceMarketInspector } from './trader/MarketInspector.js';
-import { initializeTools } from './trader/tools.js';
+import { initializeTools, initializeTrader } from './trader/tools.js';
+import { MarketTrader } from './trader/MarketTrader.js';
 
 async function main() {
   console.log('Trading Agent Starting...\n');
@@ -17,6 +18,13 @@ async function main() {
 
   // Initialize tools with instances
   initializeTools(inspector);
+  // Initialize trader (execution)
+  const trader = new MarketTrader({
+    apiKey: process.env.BINANCE_API_KEY || '',
+    apiSecret: process.env.BINANCE_SECRET || '',
+    sandbox: process.env.BINANCE_SANDBOX === 'true',
+  });
+  initializeTrader(trader);
 
   // Get the trading agent
   const agent = tradingAgent;

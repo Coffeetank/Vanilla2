@@ -151,6 +151,7 @@ class TradingAgent {
   private tools: Record<string, ToolDefinition>;
   private apiKey: string;
   private baseUrl: string;
+  private langfuse?: any;
 
   constructor() {
     this.instructions = `# CRYPTO TRADING AGENT STRATEGY
@@ -318,7 +319,20 @@ Remember: You are an autonomous trading agent. Make decisions independently base
       searchMarkets: tools.searchMarketsTool,
       getChartData: tools.getChartDataTool,
       executeJavaScript: tools.executeJavaScriptTool,
+      // Trader execution & management
+      openPositionWithProtection: tools.openPositionWithProtectionTool,
+      addProtectionOco: tools.addProtectionOcoTool,
+      cancelOco: tools.cancelOcoTool,
+      cancelOrder: tools.cancelOrderTool,
+      cancelAllOpenOrdersOnSymbol: tools.cancelAllOpenOrdersOnSymbolTool,
+      getOpenOrders: tools.getOpenOrdersTool,
+      getOpenOco: tools.getOpenOcoTool,
+      closePositionMarket: tools.closePositionMarketTool,
+      manualBorrow: tools.manualBorrowTool,
+      manualRepay: tools.manualRepayTool,
     };
+
+    // Langfuse will be lazily initialized in generate()
   }
 
   private getOrCreateThread(threadId: string): ConversationThread {
@@ -387,7 +401,32 @@ Remember: You are an autonomous trading agent. Make decisions independently base
   }
 
   async generate(prompt: string, options: { threadId: string }): Promise<{ text: string }> {
+    // Lazy init Langfuse
+    if (!this.langfuse && process.env.LANGFUSE_SECRET_KEY && process.env.LANGFUSE_PUBLIC_KEY && process.env.LANGFUSE_HOST) {
+      try {
+        // Use dynamic require to avoid type import
+        // eslint-disable-next-line @typescript-eslint/no-var-requires
+        const mod: any = require('langfuse');
+        const LangfuseCtor = mod.Langfuse || mod.default || mod;
+        this.langfuse = new LangfuseCtor({
+          secretKey: process.env.LANGFUSE_SECRET_KEY,
+          publicKey: process.env.LANGFUSE_PUBLIC_KEY,
+          baseUrl: process.env.LANGFUSE_HOST,
+          environment: process.env.NODE_ENV || 'development',
+        });
+      } catch (e) {
+        console.warn('Langfuse dynamic import failed:', e instanceof Error ? e.message : String(e));
+      }
+    }
     const thread = this.getOrCreateThread(options.threadId);
+
+    // Langfuse trace per thread
+    const lfTrace = this.langfuse?.trace({
+      id: options.threadId,
+      name: 'trading-session',
+      userId: 'autonomous-trading-agent',
+      metadata: { initialPromptChars: prompt.length }
+    });
 
     // Add user message to thread
     thread.messages.push({
@@ -435,7 +474,12 @@ Remember: You are an autonomous trading agent. Make decisions independently base
         };
 
         console.log(`🔧 Available tools: ${toolsForAPI.length}`);
-
+        const lfGen = this.langfuse?.generation({
+          traceId: options.threadId,
+          name: 'llm:chat-completion',
+          model: this.model,
+          input: JSON.stringify(requestBody).slice(0, 8000),
+        });
         const response = await fetch(`${this.baseUrl}/chat/completions`, {
           method: 'POST',
           headers: {
@@ -448,11 +492,13 @@ Remember: You are an autonomous trading agent. Make decisions independently base
         if (!response.ok) {
           const errorText = await response.text();
           console.error('❌ API Error Response:', errorText);
+          lfGen?.update?.({ level: 'ERROR', output: errorText.slice(0, 8000) });
           throw new Error(`API request failed: ${response.status} ${response.statusText} - ${errorText}`);
         }
 
         const result = await response.json() as OpenAIResponse;
         const message = result.choices[0].message;
+        lfGen?.update?.({ output: (message.content || '').slice(0, 8000) });
 
         console.log(`\n📤 ASSISTANT RESPONSE:`);
         if (message.content) {
@@ -494,6 +540,11 @@ Remember: You are an autonomous trading agent. Make decisions independently base
               // Execute the tool
               console.log(`      ⏳ Executing...`);
               const startTime = Date.now();
+              const lfSpan = this.langfuse?.span({
+                traceId: options.threadId,
+                name: `tool:${toolCall.function.name}`,
+                input: JSON.stringify(args).slice(0, 8000),
+              });
               const toolResult = await this.executeTool(toolCall.function.name, args);
               const duration = Date.now() - startTime;
 
@@ -504,6 +555,7 @@ Remember: You are an autonomous trading agent. Make decisions independently base
 
               // Truncate large tool results to stay within context limits
               const toolResultString = JSON.stringify(toolResult);
+              lfSpan?.update?.({ output: toolResultString.slice(0, 8000) });
 
               // Add tool result to thread
               thread.messages.push({
@@ -519,6 +571,7 @@ Remember: You are an autonomous trading agent. Make decisions independently base
               const errorResult = {
                 error: error instanceof Error ? error.message : 'Unknown error'
               };
+              this.langfuse?.event?.({ traceId: options.threadId, name: 'tool-error', input: toolCall.function.name, output: JSON.stringify(errorResult).slice(0, 2000), level: 'ERROR' });
               thread.messages.push({
                 role: 'tool',
                 content: JSON.stringify(errorResult),
@@ -550,9 +603,13 @@ Remember: You are an autonomous trading agent. Make decisions independently base
       }
 
       thread.updatedAt = new Date();
+      lfTrace?.update?.({ metadata: { finalResponseChars: finalResponse.length } });
+      await this.langfuse?.flush?.();
       return { text: finalResponse };
     } catch (error) {
       console.error('❌ ERROR in agent generation:', error);
+      this.langfuse?.event?.({ traceId: options.threadId, name: 'agent-error', output: error instanceof Error ? error.message : String(error), level: 'ERROR' });
+      await this.langfuse?.flush?.();
       throw error;
     }
   }
