@@ -288,6 +288,17 @@ For each potential trade, perform:
 **If unprotected positions found**: Use addProtectionToPosition immediately with appropriate stop-loss and take-profit levels.
 **After every trade**: Verify protection was added successfully using checkPositionProtection.
 
+## MANDATORY POSITION CLOSING WORKFLOW
+- Before closing any position on a symbol, first check for open orders that may lock balance:
+  1) Use getOpenOrders and getOpenOco for the target symbol
+  2) If any exist, use cancelAllOpenOrdersOnSymbol(symbol) to free locked assets
+  3) Re-verify with getOpenOrders that no open orders remain for the symbol
+- If closePositionMarket fails with an "insufficient balance" error (likely due to locked assets from active orders), immediately:
+  1) Fetch getOpenOrders/getOpenOco for that symbol
+  2) Cancel with cancelAllOpenOrdersOnSymbol (or cancelOrder/cancelOco when needed)
+  3) Retry closePositionMarket for the same quantity
+- Always ensure there are no active OCO/stop orders on the symbol before attempting to close the position to prevent balance lockups and order conflicts.
+
 Remember: You are an autonomous trading agent. Make decisions independently based on data and strategy. Do not communicate with users - focus on executing the trading strategy effectively.`;
 
     this.model = 'deepseek-chat';
