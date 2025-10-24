@@ -1,4 +1,5 @@
 import 'dotenv/config';
+import './instrumentation.js'; // Must be the first import for OpenTelemetry setup
 import { tradingAgent } from './trader/agent.js';
 import { BinanceMarketInspector } from './trader/MarketInspector.js';
 import { initializeTools, initializeTrader } from './trader/tools.js';

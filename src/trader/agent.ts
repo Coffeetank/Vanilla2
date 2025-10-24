@@ -1,6 +1,7 @@
 import { z } from 'zod';
 import fs from 'fs';
 import * as tools from './tools.js';
+import { startActiveObservation } from '@langfuse/tracing';
 
 // Tool definition interface
 interface ToolDefinition {
@@ -151,7 +152,6 @@ class TradingAgent {
   private tools: Record<string, ToolDefinition>;
   private apiKey: string;
   private baseUrl: string;
-  private langfuse?: any;
 
   constructor() {
     this.instructions = `# CRYPTO TRADING AGENT STRATEGY
@@ -288,6 +288,16 @@ For each potential trade, perform:
 **If unprotected positions found**: Use addProtectionToPosition immediately with appropriate stop-loss and take-profit levels.
 **After every trade**: Verify protection was added successfully using checkPositionProtection.
 
+## AUTO-BORROW POLICY FOR ENTRIES
+- When submitting openPositionWithProtection, set sideEffectType to "AUTO_BORROW_REPAY" by default (unless explicitly specified otherwise). This automatically borrows the required quote asset and sets autoRepayAtCancel=true so any debt created by a cancelled order is repaid.
+- If AUTO_BORROW_REPAY is unavailable, use "MARGIN_BUY" for long entries as a fallback.
+- Before placing an entry, always check account capacity using getAvailableUSDT, getMaxBorrowable and getMarginLevel. You may proceed with auto-borrow only if the post-trade margin level remains safe per the risk rules.
+
+## LIABILITY MONITORING (ALWAYS ON)
+- On every round start and after each trade, call getCurrentLiabilities and getTotalLiabilityValue and include the results in your notes.
+- Maintain at least a 20% margin buffer above liquidation. If marginLevel < 2.0 or liabilities are trending up, prioritize reducing exposure and repaying liabilities.
+- Prefer autoRepayAtCancel=true on all entry/protection orders and proactively repay idle liabilities using manualRepay when safe.
+
 ## MANDATORY POSITION CLOSING WORKFLOW
 - Before closing any position on a symbol, first check for open orders that may lock balance:
   1) Use getOpenOrders and getOpenOco for the target symbol
@@ -413,217 +423,181 @@ Remember: You are an autonomous trading agent. Make decisions independently base
   }
 
   async generate(prompt: string, options: { threadId: string }): Promise<{ text: string }> {
-    // Lazy init Langfuse
-    if (!this.langfuse && process.env.LANGFUSE_SECRET_KEY && process.env.LANGFUSE_PUBLIC_KEY && process.env.LANGFUSE_HOST) {
-      try {
-        // Use dynamic require to avoid type import
-        // eslint-disable-next-line @typescript-eslint/no-var-requires
-        const mod: any = require('langfuse');
-        const LangfuseCtor = mod.Langfuse || mod.default || mod;
-        this.langfuse = new LangfuseCtor({
-          secretKey: process.env.LANGFUSE_SECRET_KEY,
-          publicKey: process.env.LANGFUSE_PUBLIC_KEY,
-          baseUrl: process.env.LANGFUSE_HOST,
-          environment: process.env.NODE_ENV || 'development',
-        });
-      } catch (e) {
-        console.warn('Langfuse dynamic import failed:', e instanceof Error ? e.message : String(e));
-      }
-    }
-    const thread = this.getOrCreateThread(options.threadId);
+    return await startActiveObservation(
+      'trading-session',
+      async (trace) => {
+        const thread = this.getOrCreateThread(options.threadId);
 
-    // Langfuse trace per thread
-    const lfTrace = this.langfuse?.trace({
-      id: options.threadId,
-      name: 'trading-session',
-      userId: 'autonomous-trading-agent',
-      metadata: { initialPromptChars: prompt.length }
-    });
-
-    // Add user message to thread
-    thread.messages.push({
-      role: 'user',
-      content: prompt,
-    });
-
-    console.log(`\n🔄 === CONVERSATION ITERATION START (Thread: ${options.threadId}) ===`);
-    console.log(`📥 USER MESSAGE: ${prompt}`);
-
-    try {
-      let maxIterations = 25;
-      let iteration = 0;
-      let finalResponse = '';
-
-      while (iteration < maxIterations) {
-        iteration++;
-        console.log(`\n🔁 Iteration ${iteration}/${maxIterations}`);
-
-        // Prepare messages for API - filter out orphaned tool messages
-        const cleanMessages = this.cleanMessageHistory(thread.messages);
-        const messages: ConversationMessage[] = [
-          {
-            role: 'system',
-            content: this.instructions,
-          },
-          ...cleanMessages
-        ];
-
-        console.log(`📝 Messages being sent to API: ${messages.length} total`);
-        console.log(`   - System: 1 message`);
-        console.log(`   - Conversation: ${cleanMessages.length} messages`);
-
-        // Prepare tools for API
-        const toolsForAPI = this.convertToolsToOpenAIFormat();
-
-        // Make API call
-        const requestBody = {
-          model: this.model,
-          messages,
-          ...(toolsForAPI.length > 0 && {
-            tools: toolsForAPI,
-            tool_choice: 'auto',
-          }),
-        };
-
-        console.log(`🔧 Available tools: ${toolsForAPI.length}`);
-        const lfGen = this.langfuse?.generation({
-          traceId: options.threadId,
-          name: 'llm:chat-completion',
-          model: this.model,
-          input: JSON.stringify(requestBody).slice(0, 8000),
-        });
-        const response = await fetch(`${this.baseUrl}/chat/completions`, {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-            'Authorization': `Bearer ${this.apiKey}`,
-          },
-          body: JSON.stringify(requestBody),
-        });
-
-        if (!response.ok) {
-          const errorText = await response.text();
-          console.error('❌ API Error Response:', errorText);
-          lfGen?.update?.({ level: 'ERROR', output: errorText.slice(0, 8000) });
-          throw new Error(`API request failed: ${response.status} ${response.statusText} - ${errorText}`);
-        }
-
-        const result = await response.json() as OpenAIResponse;
-        const message = result.choices[0].message;
-        lfGen?.update?.({ output: (message.content || '').slice(0, 8000) });
-
-        console.log(`\n📤 ASSISTANT RESPONSE:`);
-        if (message.content) {
-          console.log(`💬 Content: ${message.content}`);
-        }
-        if (message.tool_calls && message.tool_calls.length > 0) {
-          console.log(`🔧 Tool calls: ${message.tool_calls.length}`);
-          message.tool_calls.forEach((toolCall, index) => {
-            console.log(`   ${index + 1}. ${toolCall.function.name}`);
-            console.log(`      ID: ${toolCall.id}`);
-            console.log(`      Parameters: ${toolCall.function.arguments}`);
-          });
-        }
-
-        // Add assistant response to thread (always, even if it has tool calls)
+        // Add user message to thread
         thread.messages.push({
-          role: 'assistant',
-          content: message.content || '',
-          tool_calls: message.tool_calls,
+          role: 'user',
+          content: prompt,
         });
 
-        if (message.content) {
-          finalResponse = message.content;
-        }
+        console.log(`\n🔄 === CONVERSATION ITERATION START (Thread: ${options.threadId}) ===`);
+        console.log(`📥 USER MESSAGE: ${prompt}`);
 
-        // Handle tool calls if any
-        if (message.tool_calls && message.tool_calls.length > 0) {
-          console.log(`\n🛠️ EXECUTING ${message.tool_calls.length} TOOL CALL(S):`);
+        try {
+          let maxIterations = 100;
+          let iteration = 0;
+          let finalResponse = '';
 
-          for (const [index, toolCall] of message.tool_calls.entries()) {
-            console.log(`\n   🔧 Tool ${index + 1}/${message.tool_calls.length}: ${toolCall.function.name}`);
-            console.log(`      Call ID: ${toolCall.id}`);
+          while (iteration < maxIterations) {
+            iteration++;
+            console.log(`\n🔁 Iteration ${iteration}/${maxIterations}`);
 
-            try {
-              // Parse tool arguments
-              const args = JSON.parse(toolCall.function.arguments);
-              console.log(`      📥 Parameters:`, JSON.stringify(args, null, 2));
+            // Prepare messages for API - filter out orphaned tool messages
+            const cleanMessages = this.cleanMessageHistory(thread.messages);
+            const messages: ConversationMessage[] = [
+              {
+                role: 'system',
+                content: this.instructions,
+              },
+              ...cleanMessages
+            ];
 
-              // Execute the tool
-              console.log(`      ⏳ Executing...`);
-              const startTime = Date.now();
-              const lfSpan = this.langfuse?.span({
-                traceId: options.threadId,
-                name: `tool:${toolCall.function.name}`,
-                input: JSON.stringify(args).slice(0, 8000),
-              });
-              const toolResult = await this.executeTool(toolCall.function.name, args);
-              const duration = Date.now() - startTime;
+            console.log(`📝 Messages being sent to API: ${messages.length} total`);
+            console.log(`   - System: 1 message`);
+            console.log(`   - Conversation: ${cleanMessages.length} messages`);
 
-              console.log(`      ✅ Success (${duration}ms)`);
-              console.log(`      📤 Result:`, typeof toolResult === 'object' ?
-                JSON.stringify(toolResult, null, 2).substring(0, 500) + (JSON.stringify(toolResult).length > 500 ? '...[truncated]' : '') :
-                toolResult);
+            // Prepare tools for API
+            const toolsForAPI = this.convertToolsToOpenAIFormat();
 
-              // Truncate large tool results to stay within context limits
-              const toolResultString = JSON.stringify(toolResult);
-              lfSpan?.update?.({ output: toolResultString.slice(0, 8000) });
+            // Make API call
+            const requestBody = {
+              model: this.model,
+              messages,
+              ...(toolsForAPI.length > 0 && {
+                tools: toolsForAPI,
+                tool_choice: 'auto',
+              }),
+            };
 
-              // Add tool result to thread
-              thread.messages.push({
-                role: 'tool',
-                content: toolResultString,
-                tool_call_id: toolCall.id,
-              });
+            console.log(`🔧 Available tools: ${toolsForAPI.length}`);
 
-            } catch (error) {
-              console.log(`      ❌ Failed: ${error instanceof Error ? error.message : 'Unknown error'}`);
+            const response = await fetch(`${this.baseUrl}/chat/completions`, {
+              method: 'POST',
+              headers: {
+                'Content-Type': 'application/json',
+                'Authorization': `Bearer ${this.apiKey}`,
+              },
+              body: JSON.stringify(requestBody),
+            });
 
-              // Add error result to thread
-              const errorResult = {
-                error: error instanceof Error ? error.message : 'Unknown error'
-              };
-              this.langfuse?.event?.({ traceId: options.threadId, name: 'tool-error', input: toolCall.function.name, output: JSON.stringify(errorResult).slice(0, 2000), level: 'ERROR' });
-              thread.messages.push({
-                role: 'tool',
-                content: JSON.stringify(errorResult),
-                tool_call_id: toolCall.id,
+            if (!response.ok) {
+              const errorText = await response.text();
+              console.error('❌ API Error Response:', errorText);
+              throw new Error(`API request failed: ${response.status} ${response.statusText} - ${errorText}`);
+            }
+
+            const result = await response.json() as OpenAIResponse;
+
+            const message = result.choices[0].message;
+
+            console.log(`\n📤 ASSISTANT RESPONSE:`);
+            if (message.content) {
+              console.log(`💬 Content: ${message.content}`);
+            }
+            if (message.tool_calls && message.tool_calls.length > 0) {
+              console.log(`🔧 Tool calls: ${message.tool_calls.length}`);
+              message.tool_calls.forEach((toolCall: any, index: number) => {
+                console.log(`   ${index + 1}. ${toolCall.function.name}`);
+                console.log(`      ID: ${toolCall.id}`);
+                console.log(`      Parameters: ${toolCall.function.arguments}`);
               });
             }
+
+            // Add assistant response to thread (always, even if it has tool calls)
+            thread.messages.push({
+              role: 'assistant',
+              content: message.content || '',
+              tool_calls: message.tool_calls,
+            });
+
+            if (message.content) {
+              finalResponse = message.content;
+            }
+
+            // Handle tool calls if any
+            if (message.tool_calls && message.tool_calls.length > 0) {
+              console.log(`\n🛠️ EXECUTING ${message.tool_calls.length} TOOL CALL(S):`);
+
+              for (const [index, toolCall] of message.tool_calls.entries()) {
+                  console.log(`\n   🔧 Tool ${index + 1}/${message.tool_calls.length}: ${toolCall.function.name}`);
+                  console.log(`      Call ID: ${toolCall.id}`);
+
+                  try {
+                    // Parse tool arguments
+                    const args = JSON.parse(toolCall.function.arguments);
+                    console.log(`      📥 Parameters:`, JSON.stringify(args, null, 2));
+
+                    // Execute the tool
+                    console.log(`      ⏳ Executing...`);
+                    const startTime = Date.now();
+                    const toolResult = await this.executeTool(toolCall.function.name, args);
+                    const duration = Date.now() - startTime;
+
+                    console.log(`      ✅ Success (${duration}ms)`);
+                    console.log(`      📤 Result:`, typeof toolResult === 'object' ?
+                      JSON.stringify(toolResult, null, 2).substring(0, 500) + (JSON.stringify(toolResult).length > 500 ? '...[truncated]' : '') :
+                      toolResult);
+
+                    // Truncate large tool results to stay within context limits
+                    const toolResultString = JSON.stringify(toolResult);
+
+                    // Add tool result to thread
+                    thread.messages.push({
+                      role: 'tool',
+                      content: toolResultString,
+                      tool_call_id: toolCall.id,
+                    });
+
+                  } catch (error) {
+                    console.log(`      ❌ Failed: ${error instanceof Error ? error.message : 'Unknown error'}`);
+
+                    // Add error result to thread
+                    const errorResult = {
+                      error: error instanceof Error ? error.message : 'Unknown error'
+                    };
+                    thread.messages.push({
+                      role: 'tool',
+                      content: JSON.stringify(errorResult),
+                      tool_call_id: toolCall.id,
+                    });
+                  }
+                }
+
+                console.log(`\n🔄 Continuing conversation with tool results...`);
+                // Continue the conversation to let the agent see tool results
+                continue;
+              } else {
+                // No more tool calls, we're done
+                console.log(`\n✅ No more tool calls - conversation complete`);
+                break;
+              }
           }
 
-          console.log(`\n🔄 Continuing conversation with tool results...`);
-          // Continue the conversation to let the agent see tool results
-          continue;
-        } else {
-          // No more tool calls, we're done
-          console.log(`\n✅ No more tool calls - conversation complete`);
-          break;
+          console.log(`\n🏁 === CONVERSATION COMPLETE ===`);
+          console.log(`📊 Final Stats:`);
+          console.log(`   - Total iterations: ${iteration}`);
+          console.log(`   - Final response length: ${finalResponse.length} characters`);
+          console.log(`   - Thread messages: ${thread.messages.length}`);
+          console.log(`   - Thread updated: ${new Date().toISOString()}`);
+
+          if (finalResponse) {
+            console.log(`\n💬 FINAL RESPONSE:`);
+            console.log(finalResponse);
+          }
+
+          thread.updatedAt = new Date();
+          trace.update({ metadata: { finalResponseChars: finalResponse.length } });
+          return { text: finalResponse };
+        } catch (error) {
+          console.error('❌ ERROR in agent generation:', error);
+          throw error;
         }
       }
-
-      console.log(`\n🏁 === CONVERSATION COMPLETE ===`);
-      console.log(`📊 Final Stats:`);
-      console.log(`   - Total iterations: ${iteration}`);
-      console.log(`   - Final response length: ${finalResponse.length} characters`);
-      console.log(`   - Thread messages: ${thread.messages.length}`);
-      console.log(`   - Thread updated: ${new Date().toISOString()}`);
-
-      if (finalResponse) {
-        console.log(`\n💬 FINAL RESPONSE:`);
-        console.log(finalResponse);
-      }
-
-      thread.updatedAt = new Date();
-      lfTrace?.update?.({ metadata: { finalResponseChars: finalResponse.length } });
-      await this.langfuse?.flush?.();
-      return { text: finalResponse };
-    } catch (error) {
-      console.error('❌ ERROR in agent generation:', error);
-      this.langfuse?.event?.({ traceId: options.threadId, name: 'agent-error', output: error instanceof Error ? error.message : String(error), level: 'ERROR' });
-      await this.langfuse?.flush?.();
-      throw error;
-    }
+    );
   }
 
   private async executeTool(toolName: string, args: any): Promise<any> {
