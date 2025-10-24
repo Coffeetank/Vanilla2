@@ -1,6 +1,5 @@
 import { z } from 'zod';
 import { VM } from 'vm2';
-import { BinanceMarginTrader } from './MarginTrader.js';
 import { BinanceMarketInspector } from './MarketInspector.js';
 
 // Tool definition interface
@@ -10,13 +9,11 @@ interface ToolDefinition {
   execute: (args: any) => Promise<any>;
 }
 
-// Initialize trader and inspector instances
-// These will be injected by the agent
-let marginTrader: BinanceMarginTrader;
+// Initialize inspector instance
+// This will be injected by the agent
 let marketInspector: BinanceMarketInspector;
 
-export function initializeTools(trader: BinanceMarginTrader, inspector: BinanceMarketInspector) {
-  marginTrader = trader;
+export function initializeTools(inspector: BinanceMarketInspector) {
   marketInspector = inspector;
 }
 
@@ -28,7 +25,7 @@ export const getAvailableUSDTTool: ToolDefinition = {
   description: 'Get current available USDT balance including borrowed amounts and interest. Returns total, free, used, borrowed, interest, and net available.',
   parameters: z.object({}),
   execute: async () => {
-    return await marginTrader.getAvailableUSDT();
+    return await marketInspector.getAvailableUSDT();
   },
 };
 
@@ -36,7 +33,7 @@ export const getAccountOverviewTool: ToolDefinition = {
   description: 'Get complete account overview including balance, positions, margin level, liabilities, and all open orders.',
   parameters: z.object({}),
   execute: async () => {
-    return await marginTrader.getAccountOverview();
+    return await marketInspector.getAccountOverview();
   },
 };
 
@@ -44,7 +41,7 @@ export const getMarginLevelTool: ToolDefinition = {
   description: 'Get current margin level and margin ratio. Critical for assessing liquidation risk.',
   parameters: z.object({}),
   execute: async () => {
-    return await marginTrader.getMarginLevel();
+    return await marketInspector.getMarginLevel();
   },
 };
 
@@ -52,7 +49,7 @@ export const getLiquidationRiskTool: ToolDefinition = {
   description: 'Get detailed liquidation risk analysis including margin level, risk percentage, and safe distance from liquidation.',
   parameters: z.object({}),
   execute: async () => {
-    return await marginTrader.getLiquidationRisk();
+    return await marketInspector.getLiquidationRisk();
   },
 };
 
@@ -64,7 +61,7 @@ export const getCurrentPositionsTool: ToolDefinition = {
   description: 'Get all current open positions with detailed P&L, notional value in USDT, entry price, and current price.',
   parameters: z.object({}),
   execute: async () => {
-    return await marginTrader.getCurrentPositions();
+    return await marketInspector.getCurrentPositions();
   },
 };
 
@@ -72,295 +69,24 @@ export const getPositionSummaryTool: ToolDefinition = {
   description: 'Get summarized view of all positions with total counts, total notional, unrealized P&L breakdown.',
   parameters: z.object({}),
   execute: async () => {
-    return await marginTrader.getPositionSummary();
+    return await marketInspector.getPositionSummary();
   },
 };
 
-export const closePositionTool: ToolDefinition = {
-  description: 'Close a specific position entirely using a market order. Automatically repays borrowed USDT by default.',
-  parameters: z.object({
-    symbol: z.string().describe('Trading pair symbol (e.g., BTC/USDT)'),
-    autoRepay: z.boolean().optional().describe('Automatically repay borrowed assets after closing (default: true)'),
-  }),
-  execute: async ({ symbol, autoRepay }: { symbol: string; autoRepay?: boolean }) => {
-    return await marginTrader.closePosition(symbol, { autoRepay });
-  },
-};
 
 // ============================================
 // ORDER MANAGEMENT TOOLS
 // ============================================
 
-export const createMarketOrderTool: ToolDefinition = {
-  description: 'Create a market order for immediate execution. ALWAYS include stopLoss and takeProfit in options for leveraged positions. Binance handles these atomically with the order.',
-  parameters: z.object({
-    symbol: z.string().describe('Trading pair symbol (e.g., BTC/USDT)'),
-    side: z.enum(['buy', 'sell']).describe('Order side: buy or sell'),
-    amount: z.number().describe('Amount to trade'),
-    options: z.object({
-      stopLoss: z.number().optional().describe('Stop loss price - REQUIRED for leveraged positions'),
-      takeProfit: z.number().optional().describe('Take profit price - REQUIRED for leveraged positions'),
-      leverage: z.number().optional().describe('Leverage multiplier (e.g., 5 for 5x)'),
-      marginMode: z.enum(['cross', 'isolated']).optional(),
-    }).optional(),
-  }),
-  execute: async ({ symbol, side, amount, options }: {
-    symbol: string;
-    side: 'buy' | 'sell';
-    amount: number;
-    options?: {
-      stopLoss?: number;
-      takeProfit?: number;
-      leverage?: number;
-      marginMode?: 'cross' | 'isolated';
-    };
-  }) => {
-    return await marginTrader.createMarketOrder(symbol, side, amount, options);
-  },
-};
 
-export const createLimitOrderTool: ToolDefinition = {
-  description: 'Create a limit order to buy/sell at a specific price or better. Order will only execute at the specified price or better.',
-  parameters: z.object({
-    symbol: z.string().describe('Trading pair symbol (e.g., BTC/USDT)'),
-    side: z.enum(['buy', 'sell']).describe('Order side: buy or sell'),
-    amount: z.number().describe('Amount to trade'),
-    price: z.number().describe('Limit price'),
-    options: z.object({
-      takeProfit: z.number().optional(),
-      stopLoss: z.number().optional(),
-      timeInForce: z.enum(['GTC', 'IOC', 'FOK']).optional(),
-      postOnly: z.boolean().optional(),
-    }).optional(),
-  }),
-  execute: async ({ symbol, side, amount, price, options }: {
-    symbol: string;
-    side: 'buy' | 'sell';
-    amount: number;
-    price: number;
-    options?: {
-      takeProfit?: number;
-      stopLoss?: number;
-      timeInForce?: 'GTC' | 'IOC' | 'FOK';
-      postOnly?: boolean;
-    };
-  }) => {
-    return await marginTrader.createLimitOrder(symbol, side, amount, price, options);
-  },
-};
 
-export const createStopLimitOrderTool: ToolDefinition = {
-  description: 'Create a stop-limit order. When stop price is reached, a limit order is placed.',
-  parameters: z.object({
-    symbol: z.string().describe('Trading pair symbol (e.g., BTC/USDT)'),
-    side: z.enum(['buy', 'sell']).describe('Order side: buy or sell'),
-    amount: z.number().describe('Amount to trade'),
-    stopPrice: z.number().describe('Stop trigger price'),
-    limitPrice: z.number().describe('Limit price after stop triggered'),
-    options: z.object({
-      reduceOnly: z.boolean().optional(),
-      timeInForce: z.enum(['GTC', 'IOC', 'FOK']).optional(),
-    }).optional(),
-  }),
-  execute: async ({ symbol, side, amount, stopPrice, limitPrice, options }: {
-    symbol: string;
-    side: 'buy' | 'sell';
-    amount: number;
-    stopPrice: number;
-    limitPrice: number;
-    options?: {
-      reduceOnly?: boolean;
-      timeInForce?: 'GTC' | 'IOC' | 'FOK';
-    };
-  }) => {
-    return await marginTrader.createStopLimitOrder(symbol, side, amount, stopPrice, limitPrice, options);
-  },
-};
-
-export const createStopMarketOrderTool: ToolDefinition = {
-  description: 'Create a stop-market order for stop-loss protection. When stop price is reached, order executes at market price immediately. Use this for reliable stop-loss execution.',
-  parameters: z.object({
-    symbol: z.string().describe('Trading pair symbol (e.g., BTC/USDT)'),
-    side: z.enum(['buy', 'sell']).describe('Order side: buy or sell (opposite of position)'),
-    amount: z.number().describe('Amount to trade'),
-    stopPrice: z.number().describe('Stop trigger price'),
-    options: z.object({
-      reduceOnly: z.boolean().optional().describe('Set to true for closing positions'),
-      timeInForce: z.enum(['GTC', 'IOC', 'FOK']).optional(),
-    }).optional(),
-  }),
-  execute: async ({ symbol, side, amount, stopPrice, options }: {
-    symbol: string;
-    side: 'buy' | 'sell';
-    amount: number;
-    stopPrice: number;
-    options?: {
-      reduceOnly?: boolean;
-      timeInForce?: 'GTC' | 'IOC' | 'FOK';
-    };
-  }) => {
-    return await marginTrader.createStopMarketOrder(symbol, side, amount, stopPrice, options);
-  },
-};
-
-export const getOpenOrdersTool: ToolDefinition = {
-  description: 'Get all open orders for a specific trading pair symbol. Symbol is required to avoid rate limiting.',
-  parameters: z.object({
-    symbol: z.string().describe('Trading pair symbol (e.g., BTC/USDT)'),
-  }),
-  execute: async ({ symbol }: { symbol: string }) => {
-    return await marginTrader.getOpenOrders(symbol);
-  },
-};
-
-export const cancelOrderTool: ToolDefinition = {
-  description: 'Cancel a specific order by order ID and symbol.',
-  parameters: z.object({
-    orderId: z.string().describe('Order ID to cancel'),
-    symbol: z.string().describe('Trading pair symbol'),
-  }),
-  execute: async ({ orderId, symbol }: { orderId: string; symbol: string }) => {
-    return await marginTrader.cancelOrder(orderId, symbol);
-  },
-};
-
-export const cancelAllOrdersTool: ToolDefinition = {
-  description: 'Cancel all open orders for a specific symbol.',
-  parameters: z.object({
-    symbol: z.string().describe('Trading pair symbol'),
-    marginMode: z.enum(['cross', 'isolated']).optional(),
-  }),
-  execute: async ({ symbol, marginMode }: { symbol: string; marginMode?: 'cross' | 'isolated' }) => {
-    return await marginTrader.cancelAllOrders(symbol, marginMode);
-  },
-};
-
-export const getCompleteOrderStatusTool: ToolDefinition = {
-  description: 'Get complete order status categorized by open, filled, and cancelled orders.',
-  parameters: z.object({}),
-  execute: async () => {
-    return await marginTrader.getCompleteOrderStatus();
-  },
-};
 
 // ============================================
 // EXIT PLAN TOOLS
 // ============================================
 
-export const createExitPlanTool: ToolDefinition = {
-  description: 'Calculate risk/reward analysis for a position exit plan. This is informational only - to actually set stop-loss and take-profit, include them in the createMarketOrder options.',
-  parameters: z.object({
-    symbol: z.string().describe('Trading pair symbol (e.g., ETH/USDT)'),
-    targetPrice: z.number().describe('Target exit price (take-profit level)'),
-    stopPrice: z.number().describe('Stop loss price'),
-  }),
-  execute: async ({ symbol, targetPrice, stopPrice }: {
-    symbol: string;
-    targetPrice: number;
-    stopPrice: number;
-  }) => {
-    // Just calculate the exit plan (risk/reward analysis)
-    const exitPlan = await marginTrader.createExitPlan(symbol, targetPrice, stopPrice, []);
 
-    return {
-      symbol,
-      targetPrice,
-      stopPrice,
-      riskRewardRatio: exitPlan.riskRewardRatio,
-      targetPnl: exitPlan.targetPnl,
-      stopPnl: exitPlan.stopPnl,
-      currentPrice: exitPlan.currentPrice,
-      status: 'calculated',
-      message: `📊 Risk/Reward: ${exitPlan.riskRewardRatio.toFixed(2)}:1. To apply these levels, use createMarketOrder with stopLoss and takeProfit options.`
-    };
-  },
-};
 
-// ============================================
-// POSITION PROTECTION TOOLS
-// ============================================
-
-export const getUnprotectedPositionsTool: ToolDefinition = {
-  description: 'Get all open positions that lack protective orders (stop-loss or take-profit). Use this to identify positions at risk.',
-  parameters: z.object({}),
-  execute: async () => {
-    const unprotected = await marginTrader.getUnprotectedPositions();
-
-    return {
-      totalUnprotected: unprotected.length,
-      positions: unprotected.map(u => ({
-        symbol: u.position.symbol,
-        side: u.position.side,
-        size: u.position.size,
-        entryPrice: u.position.entryPrice,
-        markPrice: u.position.markPrice,
-        pnl: u.position.unrealizedPnlUSDT,
-        pnlPercentage: u.position.pnlPercentage,
-        hasStopLoss: u.protection.hasStopLoss,
-        hasTakeProfit: u.protection.hasTakeProfit
-      })),
-      message: unprotected.length > 0
-        ? `⚠️ Found ${unprotected.length} unprotected position(s). Consider adding stop-loss and take-profit.`
-        : `✅ All positions are protected with risk management orders.`
-    };
-  },
-};
-
-export const addProtectionToPositionTool: ToolDefinition = {
-  description: 'Add OCO protection (stop-loss + take-profit) to an existing position. This creates an atomic OCO order that will close the position at either the stop-loss or take-profit price.',
-  parameters: z.object({
-    symbol: z.string().describe('Trading pair symbol (e.g., ETH/USDT)'),
-    stopLossPrice: z.number().describe('Stop-loss price to limit losses'),
-    takeProfitPrice: z.number().describe('Take-profit price to lock in gains'),
-  }),
-  execute: async ({ symbol, stopLossPrice, takeProfitPrice }: {
-    symbol: string;
-    stopLossPrice: number;
-    takeProfitPrice: number;
-  }) => {
-    return await marginTrader.addProtectionToPosition(symbol, stopLossPrice, takeProfitPrice);
-  },
-};
-
-export const checkPositionProtectionTool: ToolDefinition = {
-  description: 'Check if a specific position has protective orders (stop-loss or take-profit).',
-  parameters: z.object({
-    symbol: z.string().describe('Trading pair symbol (e.g., ETH/USDT)'),
-  }),
-  execute: async ({ symbol }: { symbol: string }) => {
-    const protection = await marginTrader.hasProtectiveOrders(symbol);
-
-    return {
-      symbol,
-      hasStopLoss: protection.hasStopLoss,
-      hasTakeProfit: protection.hasTakeProfit,
-      hasProtection: protection.hasProtection,
-      orderCount: protection.orders.length,
-      status: protection.hasProtection
-        ? (protection.hasStopLoss && protection.hasTakeProfit ? 'fully_protected' : 'partially_protected')
-        : 'unprotected',
-      message: protection.hasProtection
-        ? `✅ Position has ${protection.hasStopLoss ? 'stop-loss' : ''}${protection.hasStopLoss && protection.hasTakeProfit ? ' and ' : ''}${protection.hasTakeProfit ? 'take-profit' : ''}`
-        : `⚠️ Position has no protective orders`
-    };
-  },
-};
-
-export const getAllExitPlansTool: ToolDefinition = {
-  description: 'Get all saved exit plans for current positions.',
-  parameters: z.object({}),
-  execute: async () => {
-    return await marginTrader.getAllExitPlans();
-  },
-};
-
-export const checkAllExitPlansTool: ToolDefinition = {
-  description: 'Check all exit plans for invalidation conditions. Returns plans to execute and invalid plans.',
-  parameters: z.object({}),
-  execute: async () => {
-    return await marginTrader.checkAllExitPlans();
-  },
-};
 
 // ============================================
 // LIABILITY MANAGEMENT TOOLS
@@ -370,7 +96,7 @@ export const getCurrentLiabilitiesTool: ToolDefinition = {
   description: 'Get current borrowed amounts and interest for all assets.',
   parameters: z.object({}),
   execute: async () => {
-    return await marginTrader.getCurrentLiabilities();
+    return await marketInspector.getCurrentLiabilities();
   },
 };
 
@@ -378,33 +104,10 @@ export const getTotalLiabilityValueTool: ToolDefinition = {
   description: 'Get total liability value in USDT across all borrowed assets.',
   parameters: z.object({}),
   execute: async () => {
-    return await marginTrader.getTotalLiabilityValue();
+    return await marketInspector.getTotalLiabilityValue();
   },
 };
 
-export const repayMarginTool: ToolDefinition = {
-  description: 'Repay borrowed margin for a specific asset.',
-  parameters: z.object({
-    asset: z.string().describe('Asset symbol to repay (e.g., BTC, usdt)'),
-    amount: z.number().describe('Amount to repay'),
-    symbol: z.string().optional().describe('Trading pair for isolated margin'),
-  }),
-  execute: async ({ asset, amount, symbol }: { asset: string; amount: number; symbol?: string }) => {
-    return await marginTrader.repayMargin(asset, amount, symbol);
-  },
-};
-
-export const borrowMarginTool: ToolDefinition = {
-  description: 'Borrow margin for a specific asset. Check max borrowable first.',
-  parameters: z.object({
-    asset: z.string().describe('Asset symbol to borrow'),
-    amount: z.number().describe('Amount to borrow'),
-    symbol: z.string().optional().describe('Trading pair for isolated margin'),
-  }),
-  execute: async ({ asset, amount, symbol }: { asset: string; amount: number; symbol?: string }) => {
-    return await marginTrader.borrowMargin(asset, amount, symbol);
-  },
-};
 
 export const getMaxBorrowableTool: ToolDefinition = {
   description: 'Get maximum borrowable amount for a specific asset.',
@@ -413,7 +116,7 @@ export const getMaxBorrowableTool: ToolDefinition = {
     symbol: z.string().optional().describe('Trading pair for isolated margin'),
   }),
   execute: async ({ asset, symbol }: { asset: string; symbol?: string }) => {
-    return await marginTrader.getMaxBorrowable(asset, symbol);
+    return await marketInspector.getMaxBorrowable(asset, symbol);
   },
 };
 
@@ -707,31 +410,10 @@ export const allTools = [
   // Position Management
   getCurrentPositionsTool,
   getPositionSummaryTool,
-  closePositionTool,
-
-  // Order Management
-  createMarketOrderTool,
-  createLimitOrderTool,
-  createStopLimitOrderTool,
-  createStopMarketOrderTool,
-  getOpenOrdersTool,
-  cancelOrderTool,
-  cancelAllOrdersTool,
-  getCompleteOrderStatusTool,
-
-  // Exit Plans
-  createExitPlanTool,
-
-  // Position Protection
-  getUnprotectedPositionsTool,
-  addProtectionToPositionTool,
-  checkPositionProtectionTool,
 
   // Liability Management
   getCurrentLiabilitiesTool,
   getTotalLiabilityValueTool,
-  repayMarginTool,
-  borrowMarginTool,
   getMaxBorrowableTool,
 
   // Market Analysis

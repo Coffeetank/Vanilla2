@@ -1,6 +1,5 @@
 import 'dotenv/config';
 import { tradingAgent } from './trader/agent.js';
-import { BinanceMarginTrader } from './trader/MarginTrader.js';
 import { BinanceMarketInspector } from './trader/MarketInspector.js';
 import { initializeTools } from './trader/tools.js';
 
@@ -8,13 +7,6 @@ async function main() {
   console.log('Trading Agent Starting...\n');
 
   // Initialize Binance trading components
-  const trader = new BinanceMarginTrader({
-    apiKey: process.env.BINANCE_API_KEY || '',
-    secret: process.env.BINANCE_SECRET || '',
-    sandbox: process.env.BINANCE_SANDBOX === 'true',
-    marginMode: 'cross',
-  });
-
   const inspector = new BinanceMarketInspector({
     apiKey: process.env.BINANCE_API_KEY || '',
     secret: process.env.BINANCE_SECRET || '',
@@ -24,7 +16,7 @@ async function main() {
   });
 
   // Initialize tools with instances
-  initializeTools(trader, inspector);
+  initializeTools(inspector);
 
   // Get the trading agent
   const agent = tradingAgent;

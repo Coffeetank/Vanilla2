@@ -1,4 +1,5 @@
 import ccxt, { binance } from 'ccxt';
+import crypto from 'crypto';
 
 export interface MarketConfig {
   apiKey?: string;
@@ -6,6 +7,20 @@ export interface MarketConfig {
   sandbox?: boolean;
   cryptoPanicApiKey?: string;
   tavilyApiKey?: string;
+}
+
+export interface PositionInfo {
+  symbol: string;
+  side: string;
+  size: number;
+  notional: number;
+  entryPrice: number;
+  markPrice: number;
+  pnl: number;
+  pnlPercentage: number;
+  marginMode: string;
+  notionalUSDT?: number;
+  unrealizedPnlUSDT?: number;
 }
 
 export interface MarketStats {
@@ -287,6 +302,10 @@ export class BinanceMarketInspector {
   private tavilyApiKey?: string;
   private cache: Map<string, CacheEntry<any>> = new Map();
   private readonly CACHE_DURATION = 30 * 60 * 1000; // 30 minutes in milliseconds
+  private defaultMarginMode: 'cross' | 'isolated';
+  private apiKey: string;
+  private apiSecret: string;
+  private baseUrl: string;
 
   constructor(config: MarketConfig = {}) {
     this.exchange = new ccxt.binance({
@@ -294,11 +313,574 @@ export class BinanceMarketInspector {
       secret: config.secret,
       sandbox: config.sandbox || false,
       options: {
-        defaultType: 'spot'
+        defaultType: 'margin',
+        defaultMarginMode: 'cross',
+        warnOnFetchOpenOrdersWithoutSymbol: false
       }
     });
     this.cryptoPanicApiKey = config.cryptoPanicApiKey;
     this.tavilyApiKey = config.tavilyApiKey;
+    this.defaultMarginMode = 'cross';
+    this.apiKey = config.apiKey || '';
+    this.apiSecret = config.secret || '';
+    this.baseUrl = config.sandbox ? 'https://testnet.binance.vision' : 'https://api.binance.com';
+  }
+
+  /**
+   * Sign a request with HMAC-SHA256 signature for Binance API
+   */
+  private signRequest(params: Record<string, any>): string {
+    const queryString = Object.entries(params)
+      .map(([key, value]) => `${key}=${encodeURIComponent(value)}`)
+      .join('&');
+
+    const signature = crypto
+      .createHmac('sha256', this.apiSecret)
+      .update(queryString)
+      .digest('hex');
+
+    return `${queryString}&signature=${signature}`;
+  }
+
+  /**
+   * Make a signed POST request to Binance API
+   */
+  private async makeSignedRequest(endpoint: string, params: Record<string, any>): Promise<any> {
+    const signedParams = this.signRequest(params);
+    const url = `${this.baseUrl}${endpoint}?${signedParams}`;
+
+    const response = await fetch(url, {
+      method: 'POST',
+      headers: {
+        'X-MBX-APIKEY': this.apiKey,
+        'Content-Type': 'application/x-www-form-urlencoded'
+      }
+    });
+
+    if (!response.ok) {
+      const errorData = await response.text();
+      throw new Error(`Binance API error: ${response.status} ${response.statusText} - ${errorData}`);
+    }
+
+    return await response.json();
+  }
+
+  // Account & Balance Inspection Functions
+  async getBalance(marginMode?: 'cross' | 'isolated', symbols?: string[]): Promise<any> {
+    return await this.exchange.fetchBalance({
+      marginMode: marginMode || this.defaultMarginMode,
+      symbols: symbols
+    });
+  }
+
+  async getAvailableUSDT(): Promise<{
+    total: number;
+    free: number;
+    used: number;
+    borrowed: number;
+    interest: number;
+    netAvailable: number;
+  }> {
+    const balance = await this.getBalance();
+    // Use USDT as the primary stablecoin
+    const usdtBalance = balance['USDT'] || { total: 0, free: 0, used: 0 };
+
+    // Get USDT asset info for borrowed amounts
+    const usdtInfo = balance.info?.userAssets?.['USDT'] || {};
+
+    return {
+      total: usdtBalance.total || 0,
+      free: usdtBalance.free || 0,
+      used: usdtBalance.used || 0,
+      borrowed: parseFloat(usdtInfo.borrowed || '0'),
+      interest: parseFloat(usdtInfo.interest || '0'),
+      netAvailable: (usdtBalance.free || 0) - parseFloat(usdtInfo.borrowed || '0') - parseFloat(usdtInfo.interest || '0')
+    };
+  }
+
+  async getCurrentPositions(): Promise<PositionInfo[]> {
+    const balance = await this.getBalance();
+    const positions: PositionInfo[] = [];
+
+    for (const [_id, assetData] of Object.entries(balance.info.userAssets || {})) {
+      const positionData = assetData as any;
+      const asset = positionData.asset; // Get the actual asset symbol from the data
+      const netAsset = parseFloat(positionData.netAsset || '0');
+
+      // Skip if no position
+      if (netAsset === 0) continue;
+
+      // Skip if no valid asset symbol
+      if (!asset || asset.length < 2) {
+        continue;
+      }
+
+      // Skip common quote/stable assets that aren't traded positions
+      if (['USDT', 'USDC', 'BUSD', 'USD'].includes(asset)) {
+        continue;
+      }
+
+      try {
+        // Construct proper trading symbol
+        const symbol = asset.includes('/') ? asset : `${asset}/USDT`;
+        const [, quoteAsset] = symbol.split('/');
+
+        // Get recent trades to calculate average entry price
+        const entryPrice = await this.calculateAverageEntryPrice(symbol);
+        const markPrice = await this.getCurrentPrice(symbol);
+
+        // Calculate notional and P&L in quote currency
+        const notional = Math.abs(netAsset) * markPrice;
+        const pnl = this.calculatePnL(netAsset, entryPrice, markPrice);
+
+        // Convert to USDT if quote currency is not USDT
+        let notionalUSDT: number;
+        let unrealizedPnlUSDT: number;
+
+        if (quoteAsset === 'USDT') {
+          // Already in USDT, no conversion needed
+          notionalUSDT = notional;
+          unrealizedPnlUSDT = pnl;
+        } else {
+          // Need to convert from quote currency to USDT
+          const USDTPrice = await this.getUSDTPrice(quoteAsset);
+          notionalUSDT = notional * USDTPrice;
+          unrealizedPnlUSDT = pnl * USDTPrice;
+        }
+
+        const position: PositionInfo = {
+          symbol: symbol,
+          side: netAsset > 0 ? 'long' : 'short',
+          size: Math.abs(netAsset),
+          notional: notional,
+          entryPrice: entryPrice,
+          markPrice: markPrice,
+          pnl: pnl,
+          pnlPercentage: this.calculatePnLPercentage(netAsset, entryPrice, markPrice),
+          marginMode: this.defaultMarginMode,
+          notionalUSDT: notionalUSDT,
+          unrealizedPnlUSDT: unrealizedPnlUSDT,
+        };
+
+        positions.push(position);
+      } catch (error) {
+        console.warn(`Skipping asset ${asset} due to error:`, (error as Error).message);
+      }
+    }
+
+    return positions;
+  }
+
+  async getBorrowHistory(asset?: string, symbol?: string): Promise<any> {
+    return await this.exchange.fetchBorrowInterest(asset, symbol);
+  }
+
+  async getMaxBorrowable(asset: string, symbol?: string): Promise<any> {
+    try {
+      const balance = await this.getBalance();
+      const marginLevel = await this.getMarginLevel();
+
+      if (this.defaultMarginMode === 'isolated' && symbol) {
+        // For isolated margin, calculate max borrowable for specific pair
+        const pairData = balance.info.userAssets?.[symbol];
+        if (!pairData) {
+          return { asset, maxBorrowable: 0, error: 'Trading pair not found' };
+        }
+
+        // Get current collateral value
+        const collateralValue = parseFloat(pairData.netAsset || '0') * parseFloat(pairData.indexPrice || '1');
+
+        // Isolated margin typically allows 3:1 leverage (varies by pair)
+        const maxLeverage = 3; // This should be fetched from exchange info
+        const maxBorrowable = Math.max(0, (collateralValue * maxLeverage) - collateralValue);
+
+        return {
+          asset,
+          symbol,
+          marginMode: 'isolated',
+          collateralValue,
+          maxBorrowable,
+          currentlyBorrowed: parseFloat(pairData.borrowed || '0'),
+          availableToBorrow: Math.max(0, maxBorrowable - parseFloat(pairData.borrowed || '0'))
+        };
+      } else {
+        // For cross margin, calculate based on total account equity
+        const totalNetAsset = parseFloat(balance.info.totalNetAssetOfBtc || '0');
+        const totalLiability = parseFloat(balance.info.totalLiabilityOfBtc || '0');
+
+        // If no existing debt, calculate based on collateral alone (3x leverage)
+        if (totalLiability === 0 || totalLiability < 0.00001) {
+          // No debt yet - can borrow up to 2x collateral (for 3x total exposure)
+          const maxBorrowBtc = totalNetAsset * 2; // 3x leverage = 1x collateral + 2x borrowed
+
+          // Convert from BTC terms to asset amount
+          let maxAdditionalBorrowAsset: number;
+          let assetPriceInBtc: number;
+
+          if (asset === 'USDT' || asset === 'USDC' || asset === 'BUSD') {
+            const btcPrice = await this.getCurrentPrice('BTC/USDT');
+            assetPriceInBtc = 1 / btcPrice;
+            maxAdditionalBorrowAsset = maxBorrowBtc / assetPriceInBtc;
+          } else {
+            const assetPrice = await this.getCurrentPrice(`${asset}/USDT`);
+            const btcPrice = await this.getCurrentPrice('BTC/USDT');
+            assetPriceInBtc = assetPrice / btcPrice;
+            maxAdditionalBorrowAsset = maxBorrowBtc / assetPriceInBtc;
+          }
+
+          return {
+            asset,
+            marginMode: 'cross',
+            totalNetAssetBtc: totalNetAsset,
+            totalLiabilityBtc: totalLiability,
+            currentMarginLevel: 'N/A (no debt)',
+            maxAdditionalBorrowBtc: maxBorrowBtc,
+            maxAdditionalBorrowAsset: maxAdditionalBorrowAsset,
+            assetPriceInBtc: assetPriceInBtc
+          };
+        }
+
+        // Has existing debt - check margin level for safety
+        const safeMarginLevel = 1.5; // Keep above liquidation threshold
+        const currentMarginLevel = marginLevel.marginLevel || 1;
+
+        if (currentMarginLevel <= safeMarginLevel) {
+          return {
+            asset,
+            marginMode: 'cross',
+            maxBorrowable: 0,
+            reason: 'Margin level too low for additional borrowing',
+            currentMarginLevel,
+            safeMarginLevel
+          };
+        }
+
+        // Calculate max additional borrowing to maintain safe margin level
+        const maxTotalLiability = totalNetAsset / safeMarginLevel;
+        const maxAdditionalBorrow = Math.max(0, maxTotalLiability - totalLiability);
+
+        // Convert from BTC terms to asset amount
+        let maxAdditionalBorrowAsset: number;
+        let assetPriceInBtc: number;
+
+        if (asset === 'USDT' || asset === 'USDC' || asset === 'BUSD') {
+          // For stablecoins, calculate price as 1 / BTC price
+          const btcPrice = await this.getCurrentPrice('BTC/USDT');
+          assetPriceInBtc = 1 / btcPrice;
+          maxAdditionalBorrowAsset = maxAdditionalBorrow / assetPriceInBtc;
+        } else {
+          // For other assets, get their USDT price and convert to BTC terms
+          const assetPrice = await this.getCurrentPrice(`${asset}/USDT`);
+          const btcPrice = await this.getCurrentPrice('BTC/USDT');
+          assetPriceInBtc = assetPrice / btcPrice;
+          maxAdditionalBorrowAsset = maxAdditionalBorrow / assetPriceInBtc;
+        }
+
+        return {
+          asset,
+          marginMode: 'cross',
+          totalNetAssetBtc: totalNetAsset,
+          totalLiabilityBtc: totalLiability,
+          currentMarginLevel,
+          maxAdditionalBorrowBtc: maxAdditionalBorrow,
+          maxAdditionalBorrowAsset: maxAdditionalBorrowAsset,
+          assetPriceInBtc: assetPriceInBtc
+        };
+      }
+    } catch (error) {
+      return {
+        asset,
+        symbol,
+        error: (error as Error).message,
+        maxBorrowable: 0
+      };
+    }
+  }
+
+  async getCurrentLiabilities(): Promise<any> {
+    const balance = await this.getBalance();
+    const liabilities: any = {};
+
+    if (this.defaultMarginMode === 'cross') {
+      // For cross margin, get all borrowed assets
+      for (const [asset, assetInfo] of Object.entries(balance.info.userAssets || {})) {
+        const info = assetInfo as any;
+        if (info.borrowed && parseFloat(info.borrowed) > 0) {
+          liabilities[asset] = {
+            borrowed: parseFloat(info.borrowed),
+            interest: parseFloat(info.interest || '0'),
+            total: parseFloat(info.borrowed) + parseFloat(info.interest || '0')
+          };
+        }
+      }
+    } else {
+      // For isolated margin, liabilities are per symbol
+      liabilities.isolated = balance.info.userAssets || {};
+    }
+
+    return liabilities;
+  }
+
+  async getTotalLiabilityValue(): Promise<number> {
+    const balance = await this.getBalance();
+    return parseFloat(balance.info.totalLiabilityOfBtc || '0');
+  }
+
+  async getLiabilityForAsset(asset: string, symbol?: string): Promise<any> {
+    const balance = await this.getBalance();
+
+    if (this.defaultMarginMode === 'isolated' && symbol) {
+      // Get liability for specific isolated margin pair
+      const pairInfo = balance.info.userAssets?.[symbol];
+      return {
+        asset,
+        symbol,
+        borrowed: parseFloat(pairInfo?.borrowed || '0'),
+        interest: parseFloat(pairInfo?.interest || '0'),
+        total: parseFloat(pairInfo?.borrowed || '0') + parseFloat(pairInfo?.interest || '0')
+      };
+    } else {
+      // Get liability for cross margin asset
+      const assetInfo = balance.info.userAssets?.[asset];
+      return {
+        asset,
+        borrowed: parseFloat(assetInfo?.borrowed || '0'),
+        interest: parseFloat(assetInfo?.interest || '0'),
+        total: parseFloat(assetInfo?.borrowed || '0') + parseFloat(assetInfo?.interest || '0')
+      };
+    }
+  }
+
+  async getLiquidationRisk(): Promise<any> {
+    const marginLevel = await this.getMarginLevel();
+    const liabilities = await this.getCurrentLiabilities();
+
+    return {
+      marginLevel: marginLevel.marginLevel,
+      totalLiability: marginLevel.totalLiabilityOfBtc,
+      totalAsset: marginLevel.totalAssetOfBtc,
+      riskLevel: this.calculateRiskLevel(marginLevel.marginLevel),
+      liabilities,
+      recommendation: this.getLiquidationRecommendation(marginLevel.marginLevel)
+    };
+  }
+
+  async getMarginLevel(): Promise<any> {
+    const balance = await this.getBalance();
+    return {
+      marginLevel: balance.info.marginLevel || 0,
+      totalAssetOfBtc: balance.info.totalAssetOfBtc || 0,
+      totalLiabilityOfBtc: balance.info.totalLiabilityOfBtc || 0,
+      totalNetAssetOfBtc: balance.info.totalNetAssetOfBtc || 0
+    };
+  }
+
+  async getPositionSummary(): Promise<{
+    totalPositions: number;
+    totalNotionalUSDT: number;
+    totalUnrealizedPnlUSDT: number;
+    longPositions: PositionInfo[];
+    shortPositions: PositionInfo[];
+    biggestWinner: PositionInfo | null;
+    biggestLoser: PositionInfo | null;
+  }> {
+    const positions = await this.getCurrentPositions();
+
+    const longPositions = positions.filter(p => p.side === 'long');
+    const shortPositions = positions.filter(p => p.side === 'short');
+
+    const totalNotionalUSDT = positions.reduce((sum, p) => sum + (p.notionalUSDT || 0), 0);
+    const totalUnrealizedPnlUSDT = positions.reduce((sum, p) => sum + (p.unrealizedPnlUSDT || 0), 0);
+
+    // Find biggest winner and loser by unrealized PnL
+    let biggestWinner: PositionInfo | null = null;
+    let biggestLoser: PositionInfo | null = null;
+
+    for (const position of positions) {
+      const pnl = position.unrealizedPnlUSDT || 0;
+
+      if (!biggestWinner || pnl > (biggestWinner.unrealizedPnlUSDT || 0)) {
+        biggestWinner = position;
+      }
+
+      if (!biggestLoser || pnl < (biggestLoser.unrealizedPnlUSDT || 0)) {
+        biggestLoser = position;
+      }
+    }
+
+    return {
+      totalPositions: positions.length,
+      totalNotionalUSDT,
+      totalUnrealizedPnlUSDT,
+      longPositions,
+      shortPositions,
+      biggestWinner,
+      biggestLoser
+    };
+  }
+
+  async getAccountOverview(): Promise<{
+    availableUSDT: any;
+    positions: PositionInfo[];
+    liabilities: any;
+    marginLevel: any;
+    liquidationRisk: any;
+    summary: {
+      totalEquityUSDT: number;
+      totalPositionValueUSDT: number;
+      totalUnrealizedPnlUSDT: number;
+      freeMarginUSDT: number;
+      marginUtilization: number;
+    };
+  }> {
+    // Get positions first
+    const positions = await this.getCurrentPositions();
+
+    // Get all account data
+    const [availableUSDT, liabilities, marginLevel, liquidationRisk] =
+      await Promise.all([
+        this.getAvailableUSDT(),
+        this.getCurrentLiabilities(),
+        this.getMarginLevel(),
+        this.getLiquidationRisk()
+      ]);
+
+    // Calculate summary
+    const totalPositionValueUSDT = positions.reduce((sum, p) => sum + (p.notionalUSDT || 0), 0);
+    const totalUnrealizedPnlUSDT = positions.reduce((sum, p) => sum + (p.unrealizedPnlUSDT || 0), 0);
+    const totalEquityUSDT = availableUSDT.netAvailable + totalPositionValueUSDT + totalUnrealizedPnlUSDT;
+    const freeMarginUSDT = availableUSDT.free;
+    const marginUtilization = totalPositionValueUSDT / (totalEquityUSDT || 1) * 100;
+
+    return {
+      availableUSDT,
+      positions,
+      liabilities,
+      marginLevel,
+      liquidationRisk,
+      summary: {
+        totalEquityUSDT,
+        totalPositionValueUSDT,
+        totalUnrealizedPnlUSDT,
+        freeMarginUSDT,
+        marginUtilization
+      }
+    };
+  }
+
+  async getMarketData(symbol: string): Promise<any> {
+    return {
+      ticker: await this.exchange.fetchTicker(symbol),
+      orderBook: await this.exchange.fetchOrderBook(symbol),
+      trades: await this.exchange.fetchTrades(symbol)
+    };
+  }
+
+  async getTradingFees(symbol?: string): Promise<any> {
+    if (symbol) {
+      return await this.exchange.fetchTradingFee(symbol);
+    }
+    return await this.exchange.fetchTradingFees();
+  }
+
+  // Helper methods
+  private async calculateAverageEntryPrice(asset: string): Promise<number> {
+    try {
+      // Get recent trades for this asset to calculate average entry price
+      const trades = await this.exchange.fetchMyTrades(asset, undefined, 50, {
+        marginMode: this.defaultMarginMode
+      });
+
+      if (trades.length === 0) return 0;
+
+      let totalCost = 0;
+      let totalAmount = 0;
+      let currentPosition = 0;
+
+      // Calculate weighted average entry price
+      for (const trade of trades.reverse()) { // Start from oldest
+        const amount = (trade.amount || 0) * (trade.side === 'buy' ? 1 : -1);
+        const cost = trade.cost || 0;
+        const prevPosition = currentPosition;
+        currentPosition += amount;
+
+        // If position crosses zero, reset calculation
+        if ((prevPosition > 0 && currentPosition < 0) || (prevPosition < 0 && currentPosition > 0)) {
+          totalCost = cost * (trade.side === 'buy' ? 1 : -1);
+          totalAmount = amount;
+        } else {
+          totalCost += cost * (trade.side === 'buy' ? 1 : -1);
+          totalAmount += amount;
+        }
+      }
+
+      return totalAmount !== 0 ? Math.abs(totalCost / totalAmount) : 0;
+    } catch (error) {
+      console.warn(`Could not calculate entry price for ${asset}:`, error);
+      return 0;
+    }
+  }
+
+  private async getCurrentPrice(asset: string): Promise<number> {
+    try {
+      // Try to get current ticker price
+      const ticker = await this.exchange.fetchTicker(asset);
+      return ticker.last || ticker.close || 0;
+    } catch (error) {
+      console.warn(`Could not get current price for ${asset}:`, error);
+      return 0;
+    }
+  }
+
+  private async getUSDTPrice(asset: string): Promise<number> {
+    try {
+      if (asset === 'USDT' || asset === 'USDC' || asset === 'BUSD') return 1;
+
+      // Try direct USDT pair first
+      try {
+        const ticker = await this.exchange.fetchTicker(`${asset}/USDT`);
+        return ticker.last || ticker.close || 0;
+      } catch {
+        // Fallback through BTC
+        const assetBtc = await this.exchange.fetchTicker(`${asset}/BTC`);
+        const btcUSDT = await this.exchange.fetchTicker('BTC/USDT');
+        return (assetBtc.last || 0) * (btcUSDT.last || 0);
+      }
+    } catch (error) {
+      console.warn(`Could not get USDT price for ${asset}:`, error);
+      return 0;
+    }
+  }
+
+  private calculatePnL(netAsset: number, entryPrice: number, markPrice: number): number {
+    if (entryPrice === 0 || markPrice === 0) return 0;
+
+    const pnl = netAsset * (markPrice - entryPrice);
+    return pnl;
+  }
+
+  private calculatePnLPercentage(netAsset: number, entryPrice: number, markPrice: number): number {
+    if (entryPrice === 0) return 0;
+
+    const side = netAsset > 0 ? 1 : -1;
+    const pnlPercentage = side * ((markPrice - entryPrice) / entryPrice) * 100;
+    return pnlPercentage;
+  }
+
+  private calculateRiskLevel(marginLevel: number): string {
+    if (marginLevel >= 3.0) return 'LOW';
+    if (marginLevel >= 2.0) return 'MEDIUM';
+    if (marginLevel >= 1.5) return 'HIGH';
+    if (marginLevel >= 1.1) return 'CRITICAL';
+    return 'LIQUIDATION_IMMINENT';
+  }
+
+  private getLiquidationRecommendation(marginLevel: number): string {
+    if (marginLevel >= 3.0) return 'Safe to continue trading';
+    if (marginLevel >= 2.0) return 'Consider reducing position size';
+    if (marginLevel >= 1.5) return 'Reduce positions or add collateral';
+    if (marginLevel >= 1.1) return 'URGENT: Close positions or repay loans immediately';
+    return 'CRITICAL: Account will be liquidated soon';
   }
 
   // Price and 24h Statistics
@@ -759,34 +1341,6 @@ export class BinanceMarketInspector {
     };
   }
 
-  // Utility Functions
-  private async getUSDTPrice(symbol: string): Promise<number> {
-    try {
-      if (symbol.includes('USDT') || symbol.includes('USDT')) return 1;
-
-      const baseAsset = symbol.split('/')[0];
-
-      // Try direct USDT pair first
-      try {
-        const ticker = await this.exchange.fetchTicker(`${baseAsset}/USDT`);
-        return ticker.last || ticker.close || 0;
-      } catch {
-        // Fallback to USDT
-        try {
-          const ticker = await this.exchange.fetchTicker(`${baseAsset}/USDT`);
-          return ticker.last || ticker.close || 0;
-        } catch {
-          // Fallback through BTC
-          const btcTicker = await this.exchange.fetchTicker(`${baseAsset}/BTC`);
-          const btcUSDTTicker = await this.exchange.fetchTicker('BTC/USDT');
-          return (btcTicker.last || 0) * (btcUSDTTicker.last || 0);
-        }
-      }
-    } catch (error) {
-      console.warn(`Could not get USDT price for ${symbol}:`, error);
-      return 0;
-    }
-  }
 
   async searchMarkets(query: string): Promise<string[]> {
     const markets = await this.exchange.fetchMarkets();
