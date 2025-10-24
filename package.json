@@ -1,0 +1,24 @@
+{
+  "name": "vanilla2",
+  "version": "1.0.0",
+  "description": "Agentic Trading Bot",
+  "main": "index.js",
+  "scripts": {
+    "build": "tsc",
+    "start": "node dist/index.js",
+    "dev": "ts-node src/index.ts"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "devDependencies": {
+    "@types/dotenv": "^6.1.1",
+    "@types/node": "^24.9.1",
+    "ts-node": "^10.9.2",
+    "typescript": "^5.9.3"
+  },
+  "dependencies": {
+    "ccxt": "^4.5.12",
+    "dotenv": "^17.2.3"
+  }
+}
