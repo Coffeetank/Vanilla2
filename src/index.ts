@@ -39,7 +39,8 @@ async function main() {
   console.log('\n' + '='.repeat(60) + '\n');
 
   const prompt = `New round begins.
-Symbols under management: BTC/USDT,ETH/USDT,BNB/USDT,XRP/USDT,SOL/USDT,TRX/USDT,AVAX/USDT
+Symbols under management: BTC/USDT,ETH/USDT,BNB/USDT,XRP/USDT,SOL/USDT,AVAX/USDT
+Do not make trading other than these symbols.
 Current time: ${new Date().toUTCString()}
 Follow the system instructions to analyze the market, choose actions, and update the note.`;
 

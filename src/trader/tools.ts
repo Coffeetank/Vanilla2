@@ -127,7 +127,7 @@ export const getMarketStatsTool: ToolDefinition = {
 };
 
 export const getTechnicalIndicatorsTool: ToolDefinition = {
-  description: 'Get technical indicators including RSI, MACD, Bollinger Bands, and moving averages.',
+  description: 'Get technical indicators including RSI (Wilder smoothed), MACD with trend detection (histogram-based momentum), Bollinger Bands, and moving averages. MACD trend indicates bullish momentum when histogram is positive and increasing, bearish when negative and decreasing.',
   parameters: z.object({
     symbol: z.string().describe('Trading pair symbol'),
     timeframe: z.string().default('1h').describe('Timeframe (e.g., 1m, 5m, 15m, 1h, 4h, 1d)'),
@@ -233,7 +233,7 @@ export const getCompleteMarketOverviewTool: ToolDefinition = {
 };
 
 export const getMarketOverviewSummaryTool: ToolDefinition = {
-  description: 'Get concise market overview with key metrics, sentiment, technical signal, and recommendation. Use this first before diving into detailed analysis.',
+  description: 'Get concise market overview with key metrics, sentiment, technical signal, and recommendation. Combines RSI, MACD trend, and Bollinger Bands for multi-indicator signals. Use this first before diving into detailed analysis.',
   parameters: z.object({
     symbol: z.string().describe('Trading pair symbol'),
   }),

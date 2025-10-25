@@ -1363,18 +1363,33 @@ export class BinanceMarketInspector {
     const signalLine = this.calculateEMA(macdLine, 9);
     const histogram = macdLine.map((val, i) => val - signalLine[i]);
 
+    // Determine MACD trend based on histogram and its slope
+    let macdTrend: 'bullish' | 'bearish' | 'neutral' = 'neutral';
+    const currentHistogram = histogram[histogram.length - 1];
+    const prevHistogram = histogram.length > 1 ? histogram[histogram.length - 2] : 0;
+    
+    if (currentHistogram > 0 && currentHistogram > prevHistogram) {
+      macdTrend = 'bullish'; // Positive and increasing = bullish momentum
+    } else if (currentHistogram < 0 && currentHistogram < prevHistogram) {
+      macdTrend = 'bearish'; // Negative and decreasing = bearish momentum
+    }
+    // If histogram is near zero or changing direction, consider neutral
+    
     const macd = {
       macd: macdLine[macdLine.length - 1],
       signal: signalLine[signalLine.length - 1],
-      histogram: histogram[histogram.length - 1],
-      trend: histogram[histogram.length - 1] > histogram[histogram.length - 2] ? 'bullish' : 'bearish' as 'bullish' | 'bearish' | 'neutral'
+      histogram: currentHistogram,
+      trend: macdTrend
     };
 
     // Bollinger Bands
     const sma20 = this.calculateSMA(closes, 20);
-    const stdDev = this.calculateStandardDeviation(closes.slice(-20));
     const currentSMA = sma20[sma20.length - 1];
     const currentPrice = closes[closes.length - 1];
+    
+    // Calculate standard deviation for the last 20 closes used in the SMA
+    const closesForSMA = closes.slice(-20);
+    const stdDev = this.calculateStandardDeviation(closesForSMA);
 
     const bollingerBands = {
       upper: currentSMA + (2 * stdDev),
@@ -1886,19 +1901,39 @@ export class BinanceMarketInspector {
       const technicalIndicators = results[2].status === 'fulfilled' ? results[2].value as any : null;
 
       const rsi = technicalIndicators?.rsi || 50;
-      const macdSignal = technicalIndicators?.macd?.signal || 'neutral';
+      const macdTrend = technicalIndicators?.macd?.trend || 'neutral';
+      const bollingerPosition = technicalIndicators?.bollingerBands?.position || 'neutral';
 
-      // Simple technical signal
+      // Enhanced technical signal combining multiple indicators
       let technicalSignal = 'neutral';
-      if (rsi < 30 && macdSignal === 'bullish') technicalSignal = 'bullish';
-      else if (rsi > 70 && macdSignal === 'bearish') technicalSignal = 'bearish';
-      else if (rsi < 40) technicalSignal = 'oversold';
-      else if (rsi > 60) technicalSignal = 'overbought';
+      
+      // Strong bullish: oversold RSI + bullish MACD + not overbought on Bollinger
+      if (rsi < 30 && macdTrend === 'bullish' && bollingerPosition !== 'overbought') {
+        technicalSignal = 'bullish';
+      }
+      // Strong bearish: overbought RSI + bearish MACD + not oversold on Bollinger
+      else if (rsi > 70 && macdTrend === 'bearish' && bollingerPosition !== 'oversold') {
+        technicalSignal = 'bearish';
+      }
+      // Moderate signals
+      else if (rsi < 40 && macdTrend === 'bullish') {
+        technicalSignal = 'bullish';
+      }
+      else if (rsi > 60 && macdTrend === 'bearish') {
+        technicalSignal = 'bearish';
+      }
+      // Overbought/oversold flags
+      else if (rsi < 35) {
+        technicalSignal = 'oversold';
+      }
+      else if (rsi > 65) {
+        technicalSignal = 'overbought';
+      }
 
       // Simple recommendation
       let recommendation = 'hold';
-      if (technicalSignal === 'bullish' && sentiment?.sentiment === 'bullish') recommendation = 'buy';
-      else if (technicalSignal === 'bearish' && sentiment?.sentiment === 'bearish') recommendation = 'sell';
+      if (technicalSignal === 'bullish' && sentiment?.overallSentiment === 'bullish') recommendation = 'buy';
+      else if (technicalSignal === 'bearish' && sentiment?.overallSentiment === 'bearish') recommendation = 'sell';
 
       return {
         symbol,
@@ -1906,12 +1941,12 @@ export class BinanceMarketInspector {
         change24h: marketStats?.change24h || 0,
         changePercent24h: marketStats?.changePercent24h || 0,
         volume24hUSDT: marketStats?.volumeUSDT24h || 0,
-        sentiment: sentiment?.sentiment || 'neutral',
+        sentiment: sentiment?.overallSentiment || 'neutral',
         technicalSignal,
         rsi,
         trend: marketStats?.changePercent24h > 0 ? 'up' : 'down',
-        support: technicalIndicators?.support || marketStats?.low24h || 0,
-        resistance: technicalIndicators?.resistance || marketStats?.high24h || 0,
+        support: technicalIndicators?.support?.[0] || marketStats?.low24h || 0,
+        resistance: technicalIndicators?.resistance?.[0] || marketStats?.high24h || 0,
         recommendation
       };
     } catch (error) {
@@ -1964,11 +1999,27 @@ export class BinanceMarketInspector {
       losses.push(change < 0 ? Math.abs(change) : 0);
     }
 
+    // Use Wilder's Smoothing (EMA) for RSI calculation
     const rsi: number[] = [];
-    for (let i = period - 1; i < gains.length; i++) {
-      const avgGain = gains.slice(i - period + 1, i + 1).reduce((a, b) => a + b) / period;
-      const avgLoss = losses.slice(i - period + 1, i + 1).reduce((a, b) => a + b) / period;
-
+    
+    // Calculate initial average gain and loss using simple average
+    let avgGain = gains.slice(0, period).reduce((a, b) => a + b, 0) / period;
+    let avgLoss = losses.slice(0, period).reduce((a, b) => a + b, 0) / period;
+    
+    // Calculate first RSI value
+    if (avgLoss === 0) {
+      rsi.push(100);
+    } else {
+      const rs = avgGain / avgLoss;
+      rsi.push(100 - (100 / (1 + rs)));
+    }
+    
+    // Calculate subsequent RSI values using Wilder's smoothing
+    for (let i = period; i < gains.length; i++) {
+      // Wilder's Smoothing: new_avg = (old_avg * (period - 1) + new_value) / period
+      avgGain = (avgGain * (period - 1) + gains[i]) / period;
+      avgLoss = (avgLoss * (period - 1) + losses[i]) / period;
+      
       if (avgLoss === 0) {
         rsi.push(100);
       } else {

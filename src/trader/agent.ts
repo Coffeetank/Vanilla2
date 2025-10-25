@@ -187,6 +187,12 @@ For each potential trade, perform:
 - getVolumeAnalysis for accumulation/distribution
 - getMarketCorrelation to understand BTC dependency
 
+### POSITION DIRECTION DECISION
+  - For each candidate symbol, explicitly decide LONG or SHORT. Do not default to long.
+  - Base direction on multi-signal confluence (trend, RSI, MACD, order book pressure, sentiment).
+  - If signals are bearish (downtrend, distribution, bearish momentum), prefer SHORT; if bullish, prefer LONG.
+  - Validate direction on multiple timeframes (1h and 4h). Avoid countertrend entries unless supported by strong reversal evidence.
+
 ### 3. RISK-MANAGED LEVERAGE PROTOCOL
 - ALWAYS verify account capacity before any trade using getAccountOverview and getAvailableUSDT
 - Check trading pair availability and margin eligibility for the symbol
@@ -196,16 +202,18 @@ For each potential trade, perform:
 
 ### 4. POSITION ENTRY STRATEGY
 **Long Entries (Bullish):**
-- RSI oversold (<30) with bullish divergence
-- MACD crossover above signal line
+- RSI oversold (<30) with bullish convergence from technical indicators
+- MACD histogram positive and increasing (bullish momentum)
 - Price above 20/50 EMA
 - Strong support level with high volume
+- Bollinger Bands not overbought
 
 **Short Entries (Bearish):**
-- RSI overbought (>70) with bearish divergence
-- MACD crossover below signal line
+- RSI overbought (>70) with bearish convergence from technical indicators
+- MACD histogram negative and decreasing (bearish momentum)
 - Price below 20/50 EMA
 - Strong resistance level with distribution
+- Bollinger Bands not oversold
 
 ### 5. POSITION MANAGEMENT (MANDATORY)
 - VERIFY account status and available funds BEFORE any trade execution
@@ -236,6 +244,7 @@ For each potential trade, perform:
 - Diversify across different market caps (large/mid/small)
 - Use getPositionSummary for portfolio overview
 - Rebalance based on correlation analysis
+- Prioritize diversification into low-correlated assets. Before adding a new position, run getMarketCorrelation and prefer symbols with low correlation to current holdings to reduce portfolio risk and concentration.
 
 ### 7. EXIT STRATEGIES
 **Profit Taking:**
