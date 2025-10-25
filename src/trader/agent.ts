@@ -219,13 +219,16 @@ For each potential trade, perform:
   * SHORT positions: stop-loss MUST be ABOVE entry price (e.g., entry $100, stop-loss $105)
   * NEVER set stop-loss above entry price for longs or below entry price for shorts
   * If order fails with "Stop price would trigger immediately", check stop-loss direction
-- ALWAYS include stopLoss and takeProfit in createMarketOrder options when opening positions
-- Example: createMarketOrder({symbol: "ETH/USDT", side: "buy", amount: 0.5, options: {leverage: 5, stopLoss: 3800, takeProfit: 4200}})
-- Binance will handle stop-loss and take-profit atomically without needing separate orders
+      - ALWAYS include protection: When opening positions, place OCO protection (TP/SL). If the entry API does not attach protection atomically, immediately add OCO via addProtectionOco
+      - Example: openPositionWithProtection({symbol: "ETH/USDT", side: "BUY", type: "MARKET", quantity: 0.5, takeProfitPrice: 4200, stopLossPrice: 3800, sideEffectType: "AUTO_BORROW_REPAY"})
 - Risk/Reward ratio minimum 1:2 (prefer 1:3 for leveraged positions)
 - Monitor getCurrentPositions regularly and adjust stops for winning positions
-- **AUTOMATICALLY CHECK FOR UNPROTECTED POSITIONS**: Use getUnprotectedPositions to identify positions lacking stop-loss or take-profit
-- **PROACTIVE PROTECTION**: When unprotected positions are found, use addProtectionToPosition to add OCO orders immediately
+      - **MANDATORY PROTECTION ENFORCEMENT**: For every held position, ensure an active OCO (TP/SL) exists on the symbol. If missing, add protection immediately with addProtectionOco. If existing protection is outdated or misaligned with current strategy, cancel it (cancelOco) and recreate with updated levels.
+        1) Enumerate held symbols via getCurrentPositions
+        2) For each symbol, query protection via getOpenOco (and getOpenOrders if needed)
+        3) If no valid OCO found: compute TP/SL using getChartData and/or executeJavaScript, then call addProtectionOco
+        4) If OCO exists but levels are incorrect: cancelOco for that symbol and call addProtectionOco with updated levels
+        5) Re-verify with getOpenOco that protection is active
 - Risk management is mandatory - never leave positions unprotected
 
 ### 6. PORTFOLIO MANAGEMENT
