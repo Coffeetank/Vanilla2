@@ -57,7 +57,7 @@ export class MarketTrader {
       isIsolated: 'FALSE',
       symbol: '',
       amount,
-      type: 'MARGIN',
+      type: 1, // 1 = BORROW
     }).then((r: { data: () => unknown }) => r.data());
   }
 
@@ -67,7 +67,7 @@ export class MarketTrader {
       isIsolated: 'FALSE',
       symbol: '',
       amount,
-      type: 'MARGIN',
+      type: 2, // 2 = REPAY
     }).then((r: { data: () => unknown }) => r.data());
   }
 
@@ -89,6 +89,9 @@ export class MarketTrader {
     const nativeSymbol = this.toNativeSymbol(symbol);
 
     // 1) Create primary order on cross margin
+    // Note: AUTO_BORROW_REPAY automatically borrows:
+    //   - QUOTE asset (USDT) for BUY orders (longs)
+    //   - BASE asset (BTC, ETH, etc.) for SELL orders (shorts)
     const orderReq: any = {
       symbol: nativeSymbol,
       side,
@@ -98,7 +101,7 @@ export class MarketTrader {
       quoteOrderQty,
       price,
       timeInForce,
-      sideEffectType, // MARGIN_BUY or AUTO_BORROW_REPAY for leveraged entries
+      sideEffectType, // AUTO_BORROW_REPAY handles both longs and shorts automatically
       autoRepayAtCancel,
       newOrderRespType: 'FULL',
     } as const;

@@ -1309,19 +1309,39 @@ export class BinanceMarketInspector {
   }
 
   async getSymbolFilters(symbol: string): Promise<{
+    symbol: string;
     lotSize?: { minQty: number; maxQty: number; stepSize: number };
     priceFilter?: { minPrice: number; maxPrice: number; tickSize: number };
     notional?: { minNotional: number };
   }> {
     const markets = await this.exchange.fetchMarkets();
-    const market = markets.find((m: any) => m?.symbol === symbol);
-
-    if (!market) {
-      throw new Error(`Symbol ${symbol} not found`);
+    
+    // Try exact match first
+    let market = markets.find((m: any) => m?.symbol === symbol);
+    
+    // If not found, try without slash (Binance format)
+    if (!market && symbol.includes('/')) {
+      const binanceSymbol = symbol.replace('/', '');
+      market = markets.find((m: any) => m?.symbol === binanceSymbol || m?.id === binanceSymbol);
+    }
+    
+    // If still not found, try with slash (CCXT format)
+    if (!market && !symbol.includes('/')) {
+      market = markets.find((m: any) => m?.symbol === symbol || m?.id === symbol);
     }
 
-    const filters: any = {};
+    if (!market) {
+      return {
+        symbol,
+        lotSize: { minQty: 0.001, maxQty: 1000000, stepSize: 0.001 }, // Default fallback
+        priceFilter: { minPrice: 0.000001, maxPrice: 1000000, tickSize: 0.000001 },
+        notional: { minNotional: 10 }
+      };
+    }
+
+    const filters: any = { symbol: market.symbol || symbol };
     const marketFilters = (market as any).filters || [];
+    
     for (const filter of marketFilters) {
       if (filter.filterType === 'LOT_SIZE') {
         filters.lotSize = {
@@ -1340,6 +1360,17 @@ export class BinanceMarketInspector {
           minNotional: parseFloat(filter.minNotional || '0')
         };
       }
+    }
+
+    // Ensure we always return at least defaults
+    if (!filters.lotSize) {
+      filters.lotSize = { minQty: 0.001, maxQty: 1000000, stepSize: 0.001 };
+    }
+    if (!filters.priceFilter) {
+      filters.priceFilter = { minPrice: 0.000001, maxPrice: 1000000, tickSize: 0.000001 };
+    }
+    if (!filters.notional) {
+      filters.notional = { minNotional: 10 };
     }
 
     return filters;
